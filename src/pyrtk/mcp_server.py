@@ -71,10 +71,12 @@ def rtk_run_command(command: str, cwd: str = ".") -> str:
         dirs = []
         files_count = 0
         for item in target.iterdir():
-            if item.is_dir() and not item.name.startswith('.'):
+            if item.name.startswith('.'):
+                continue
+            if item.is_dir():
                 subfiles = sum(1 for _ in item.glob('*') if _.is_file())
                 dirs.append(f"{item.name}/ ({subfiles} files)")
-            elif item.is_file() and not item.name.startswith('.'):
+            else:
                 files_count += 1
         output = []
         if dirs:

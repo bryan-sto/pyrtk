@@ -5,6 +5,10 @@ from ..tracker import track
 import time
 import re
 
+# NOTE: Precompiled once — _PS_SEP is used per-row in _filter_ps(), so
+# compiling inside the loop would add overhead proportional to container count.
+_PS_SEP = re.compile(r'\s{2,}')
+
 
 def run(args: list[str], verbose: bool = False):
     cmd = ["docker"] + args
@@ -35,7 +39,7 @@ def _filter_ps(raw: str) -> str:
         return "no containers running"
     result = ["CONTAINER ID | IMAGE | STATUS | NAMES"]
     for line in lines[1:]:
-        parts = re.split(r'\s{2,}', line.strip())
+        parts = _PS_SEP.split(line.strip())
         if len(parts) >= 6:
             result.append(f"{parts[0]} | {parts[1]} | {parts[4]} | {parts[-1]}")
     return "\n".join(result)

@@ -3,6 +3,10 @@ import subprocess
 import re
 import os
 
+# NOTE: Compiled once at module load — strip_ansi() is called on every command
+# output, so recompiling per-call adds measurable overhead across a session.
+_ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
 # NOTE: RTK_TIMEOUT configures subprocess timeout (seconds). Default 120s to
 # accommodate slow pytest runs, docker build, and other long-running commands.
 _TIMEOUT: int = int(os.getenv("RTK_TIMEOUT", "120"))
@@ -28,8 +32,7 @@ def execute_command(cmd: list[str], cwd: str = ".") -> tuple[str, str, int]:
 
 def strip_ansi(text: str) -> str:
     """Strips ANSI escape characters from output text."""
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    return ansi_escape.sub('', text)
+    return _ANSI_RE.sub('', text)
 
 
 def estimate_tokens(text: str) -> int:
