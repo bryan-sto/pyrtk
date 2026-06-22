@@ -65,7 +65,9 @@ def _filter_status(raw: str) -> str:
     return "\n".join(parts) if parts else "clean"
 
 def _filter_log(raw: str) -> str:
-    lines = [l for l in raw.splitlines() if re.match(r'^[0-9a-f]{6,}', l) or l.startswith("commit ")]
+    # NOTE: Restrict to short-hash lines only. "commit <full-sha>" prefix lines
+    # are noisy and redundant when the abbreviated hash is on the same entry.
+    lines = [l for l in raw.splitlines() if re.match(r'^[0-9a-f]{7,}', l)]
     return "\n".join(lines[:10]) if lines else raw[:200]
 
 def _filter_diff(raw: str, args: list[str]) -> str:

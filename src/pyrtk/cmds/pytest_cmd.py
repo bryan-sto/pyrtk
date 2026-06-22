@@ -30,7 +30,11 @@ def _filter_pytest(raw: str) -> str:
             failures.append(line)
             continue
         if "=== ERRORS ===" in line:
+            # NOTE: Reset rather than continue accumulating — ERRORS is a
+            # distinct section from FAILURES; without this, if ERRORS appears
+            # after FAILURES, lines bleed together.
             in_failures_section = True
+            failures.append("")  # blank separator
             failures.append(line)
             continue
         if re.match(r'===+ .* in \d+\.\d+s ===+', line):

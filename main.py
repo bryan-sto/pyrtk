@@ -28,6 +28,26 @@ def docker(ctx: typer.Context, verbose: bool = typer.Option(False, "-v")):
     """Proxy docker command."""
     cmds.docker_cmd.run(ctx.args, verbose)
 
+@app.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+def ruff(ctx: typer.Context, verbose: bool = typer.Option(False, "-v")):
+    """Proxy ruff check with grouped-by-file output."""
+    cmds.ruff_cmd.run(ctx.args, verbose)
+
+@app.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+def grep(ctx: typer.Context, verbose: bool = typer.Option(False, "-v")):
+    """Proxy grep/rg with grouped-by-file output."""
+    cmds.grep_cmd.run(ctx.args, verbose)
+
+@app.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+def pip(ctx: typer.Context, verbose: bool = typer.Option(False, "-v")):
+    """Proxy pip list with compact table."""
+    cmds.pip_cmd.run(ctx.args, verbose)
+
+@app.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+def find(ctx: typer.Context, verbose: bool = typer.Option(False, "-v")):
+    """Proxy find with directory-collapsed summary."""
+    cmds.find_cmd.run(ctx.args, verbose)
+
 @app.command()
 def gain():
     """Show token savings report fetched from MemCore."""
