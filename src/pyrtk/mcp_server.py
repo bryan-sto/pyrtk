@@ -28,12 +28,10 @@ from .cmds.test_cmd import _filter_test_output
 
 # Custom logging matching memcore.log style
 def write_log(tag: str, msg: str) -> None:
-    """Write log messages to ~/.pyrtk/pyrtk.log matching MemCore format."""
+    """Write log messages to pyrtk.log in project root matching MemCore format."""
     try:
         now_str = datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        log_dir = Path.home() / ".pyrtk"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = log_dir / "pyrtk.log"
+        log_path = Path(__file__).parent.parent.parent / "pyrtk.log"
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{now_str}] [{tag}] {msg}\n")
     except Exception:
@@ -133,8 +131,14 @@ def rtk_run_command(command: str, cwd: str = ".") -> str:
         sub = cmd_args[0]
         if sub == "status":
             stdout, stderr, code = execute_command(["git", "status", "--porcelain"], cwd=cwd)
-        elif sub == "diff" and len(cmd_args) == 1:
-            stdout, stderr, code = execute_command(["git", "diff", "--stat"], cwd=cwd)
+        elif sub == "diff":
+            # Always use --stat for diff under rtk_run_command unless stat option already present
+            diff_args = ["git", "diff"]
+            has_stat_option = any(arg in cmd_args for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
+            if not has_stat_option:
+                diff_args.append("--stat")
+            diff_args.extend(cmd_args[1:])
+            stdout, stderr, code = execute_command(diff_args, cwd=cwd)
         else:
             stdout, stderr, code = execute_command(args, cwd=cwd)
     else:
