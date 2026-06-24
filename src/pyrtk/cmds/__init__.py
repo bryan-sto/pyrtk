@@ -5,5 +5,8 @@ from . import docker_cmd
 from . import pytest_cmd
 from . import ruff_cmd
 from . import grep_cmd
-from . import pip_cmd
 from . import find_cmd
+from . import pip_cmd
+from . import read_cmd
+from . import err_cmd
+from . import test_cmd

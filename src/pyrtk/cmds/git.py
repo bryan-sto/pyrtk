@@ -1,26 +1,31 @@
 # src/pyrtk/cmds/git.py
+from __future__ import annotations
+
+import re
+import sys
+import time
+
 from ..core.utils import execute_command, strip_ansi
 from ..tracker import track
-import time
-import re
 
-def run(args: list[str], verbose: bool = False):
+
+def run(args: list[str], verbose: bool = False) -> None:
     sub = args[0] if args else ""
     cmd = ["git"] + args
-    
+
     if sub == "status":
         exec_cmd = ["git", "status", "--porcelain"]
     elif sub == "diff" and len(args) == 1:
         exec_cmd = ["git", "diff", "--stat"]
     else:
         exec_cmd = cmd
-        
+
     t0 = time.time()
     stdout, stderr, code = execute_command(exec_cmd)
     exec_ms = int((time.time() - t0) * 1000)
-    
+
     raw = strip_ansi(stdout + stderr)
-    
+
     if sub == "status":
         filtered = _filter_status(raw)
     elif sub == "log":
@@ -31,16 +36,17 @@ def run(args: list[str], verbose: bool = False):
         filtered = _filter_diff(raw, args)
     else:
         filtered = raw
-        
+
     if verbose:
-        print(f"[pyrtk] git {sub} → {len(filtered)}/{len(raw)} chars "
-              f"({100 - len(filtered)*100//max(len(raw),1)}% saved)", flush=True)
-              
+        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
+        print(f"[pyrtk] git {sub} → {pct}% saved", file=sys.stderr)
+
     print(filtered)
     track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms)
-    
+
     if code != 0:
-        exit(code)
+        raise SystemExit(code)
+
 
 def _filter_status(raw: str) -> str:
     if not raw.strip():
@@ -56,7 +62,7 @@ def _filter_status(raw: str) -> str:
             untracked_count += 1
         else:
             modified.append(f"{status.strip()} {file_path}")
-            
+
     parts = []
     if modified:
         parts.append(f"modified: {', '.join(modified)}")
@@ -64,11 +70,12 @@ def _filter_status(raw: str) -> str:
         parts.append(f"untracked: {untracked_count} file(s)")
     return "\n".join(parts) if parts else "clean"
 
+
 def _filter_log(raw: str) -> str:
-    # NOTE: Restrict to short-hash lines only. "commit <full-sha>" prefix lines
-    # are noisy and redundant when the abbreviated hash is on the same entry.
-    lines = [l for l in raw.splitlines() if re.match(r'^[0-9a-f]{7,}', l)]
+    # NOTE: Match only short hashes (e.g. from git log --oneline), ignoring verbose commit header lines.
+    lines = [l for l in raw.splitlines() if re.match(r'^[0-9a-f]{7,}\s', l)]
     return "\n".join(lines[:10]) if lines else raw[:200]
+
 
 def _filter_diff(raw: str, args: list[str]) -> str:
     lines = raw.splitlines()
@@ -77,8 +84,9 @@ def _filter_diff(raw: str, args: list[str]) -> str:
         return stats[0]
     return raw[:400]
 
+
 def _filter_simple(raw: str, sub: str) -> str:
-    if "error" in raw.lower():
+    if any(w in raw.lower() for w in ("error", "rejected", "denied", "fatal")):
         return raw[:300]
     if sub == "push":
         branch = re.search(r'(HEAD -> |origin/)([^\s]+)', raw)

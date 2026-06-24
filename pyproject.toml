@@ -1,7 +1,7 @@
 [project]
 name = "pyrtk"
 version = "0.1.0"
-description = "Add your description here"
+description = "Local RTK-equivalent proxy and MCP server for token compression."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,4 +9,13 @@ dependencies = [
     "requests>=2.34.2",
     "rich>=15.0.0",
     "typer>=0.26.7",
+]
+
+[project.scripts]
+pyrtk = "main:app"
+rtk-mcp = "mcp_server:mcp.run"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
 ]

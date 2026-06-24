@@ -1,13 +1,32 @@
 # src/pyrtk/cmds/grep_cmd.py
+from __future__ import annotations
+
+import os
+import re
+import sys
+import shutil
+import time
+from collections import defaultdict
+
 from ..core.utils import execute_command, strip_ansi
 from ..tracker import track
-import time
-import re
+
+_MAX_FILES = int(os.getenv("RTK_GREP_MAX_FILES", "15"))
+_PREVIEW_LEN = int(os.getenv("RTK_GREP_PREVIEW_LEN", "80"))
+
+# grep -n / rg format: filename:lineno:content
+_GREP_LINE_RE = re.compile(r"^(.+?):(\d+):(.*)$")
 
 
-def run(args: list[str], verbose: bool = False):
-    # NOTE: prefer rg (ripgrep) if available — same filter applies to both.
-    cmd = ["grep"] + args
+def run(args: list[str], verbose: bool = False) -> None:
+    """Proxy grep/rg — group matches by file with counts and one preview per file.
+
+    Auto-selects rg over grep when available.
+    Exit code 1 (no matches) is not treated as an error.
+    """
+    tool = "rg" if shutil.which("rg") else "grep"
+    cmd = [tool] + args
+
     t0 = time.time()
     stdout, stderr, code = execute_command(cmd)
     exec_ms = int((time.time() - t0) * 1000)
@@ -15,36 +34,52 @@ def run(args: list[str], verbose: bool = False):
     raw = strip_ansi(stdout + stderr)
     filtered = _filter_grep(raw)
 
+    if verbose:
+        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
+        print(f"[pyrtk] {tool} → {pct}% saved", file=sys.stderr)
+
     print(filtered)
     track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms)
 
+    # Exit 1 from grep/rg means "no matches" — not a failure worth propagating
     if code not in (0, 1):
-        # exit code 1 from grep means "no matches" — not an error
-        exit(code)
+        raise SystemExit(code)
 
 
 def _filter_grep(raw: str) -> str:
-    """Group grep/rg matches by file; truncate long match lines."""
-    lines = raw.splitlines()
-    by_file: dict[str, list[str]] = {}
-
-    for line in lines:
-        # rg/grep with line numbers: filename:lineno:match
-        m = re.match(r'^([^:]+):(\d+):(.*)', line)
-        if m:
-            fpath, lineno, match = m.group(1), m.group(2), m.group(3)
-            by_file.setdefault(fpath, []).append(f"  L{lineno}: {match[:120]}")
-        elif line.strip():
-            by_file.setdefault("(output)", []).append(f"  {line[:120]}")
-
-    if not by_file:
+    """Group grep output by file. Shows match count + first preview per file."""
+    if not raw.strip():
         return "no matches"
 
-    out: list[str] = []
-    for fpath, matches in by_file.items():
-        out.append(f"{fpath} ({len(matches)} match(es))")
-        out.extend(matches[:5])
-        if len(matches) > 5:
-            out.append(f"  ... {len(matches) - 5} more")
+    by_file: dict[str, list[str]] = defaultdict(list)
+    unmatched: list[str] = []
 
-    return "\n".join(out)
+    for line in raw.splitlines():
+        m = _GREP_LINE_RE.match(line)
+        if m:
+            filename, _, content = m.groups()
+            by_file[filename].append(content.strip()[:_PREVIEW_LEN])
+        else:
+            unmatched.append(line)
+
+    # Single-file mode (no filename prefix)
+    if not by_file and unmatched:
+        total = len(unmatched)
+        result = [f"{total} match(es)"]
+        for line in unmatched[:5]:
+            result.append(f"  {line}")
+        if total > 5:
+            result.append(f"  ... +{total - 5} more")
+        return "\n".join(result)
+
+    total_matches = sum(len(v) for v in by_file.values())
+    result = [f"{total_matches} match(es) in {len(by_file)} file(s)"]
+
+    for filename, matches in sorted(by_file.items(), key=lambda x: -len(x[1]))[:_MAX_FILES]:
+        preview = matches[0] if matches else ""
+        result.append(f"  {filename}: {len(matches)} — {preview}")
+
+    if len(by_file) > _MAX_FILES:
+        result.append(f"  ... +{len(by_file) - _MAX_FILES} more file(s)")
+
+    return "\n".join(result)
