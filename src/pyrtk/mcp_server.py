@@ -26,14 +26,18 @@ from .cmds.pip_cmd import _filter_list as _pip_list, _filter_show as _pip_show
 from .cmds.err_cmd import _filter_errors
 from .cmds.test_cmd import _filter_test_output
 
-log_path = Path.home() / ".local" / "share" / "pyrtk" / "pyrtk.log"
-log_path.parent.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(
-    filename=str(log_path),
-    level=logging.WARNING,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
-logger = logging.getLogger(__name__)
+# Custom logging matching memcore.log style
+def write_log(tag: str, msg: str) -> None:
+    """Write log messages to ~/.pyrtk/pyrtk.log matching MemCore format."""
+    try:
+        now_str = datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        log_dir = Path.home() / ".pyrtk"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "pyrtk.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{now_str}] [{tag}] {msg}\n")
+    except Exception:
+        pass
 
 mcp = FastMCP("pyrtk")
 
@@ -78,6 +82,8 @@ def _log(command: str, cwd: str, raw: str, filtered: str, exec_ms: int) -> None:
         "pct": pct,
         "exec_ms": exec_ms,
     }
+    # Log locally in pyrtk.log
+    write_log("CMD", f"rtk_run_command - Cmd: \"{_scrub(command)}\", Saved: {saved} tokens ({pct}%), Exec: {exec_ms}ms")
     threading.Thread(target=_post_to_memcore, args=(payload,), daemon=True).start()
 
 
@@ -258,7 +264,7 @@ def rtk_run_command(command: str, cwd: str = ".") -> str:
             filtered = _filter_test_output(raw, code)
 
     except Exception as e:
-        logger.warning("filter failed for %s: %s", main_cmd, e)
+        write_log("FILTER ERROR", f"{main_cmd} - filter failed: {str(e)}")
         filtered = raw
 
     _log(command, cwd, raw, filtered, exec_ms)
@@ -271,6 +277,7 @@ def rtk_gain() -> str:
 
     Use this to check how many tokens pyrtk has saved in this project.
     """
+    write_log("GAIN", "rtk_gain - query savings")
     try:
         res = requests.get(
             f"http://localhost:{_MEMCORE_PORT}/agentmemory/gain",
@@ -314,6 +321,7 @@ def rtk_passthrough(command: str, cwd: str = ".") -> str:
     exec_ms = int((time.time() - t0) * 1000)
 
     raw = stdout + stderr
+    write_log("PASSTHROUGH", f"rtk_passthrough - Cmd: \"{_scrub(command)}\", Exec: {exec_ms}ms")
     _log(command, cwd, raw, raw, exec_ms)
 
     return raw
@@ -335,6 +343,7 @@ def rtk_discover(since_hours: int = 24) -> str:
         "pip", "uv", "docker", "ls", "read", "err", "test",
     }
 
+    write_log("DISCOVER", f"rtk_discover - hours: {since_hours}")
     try:
         res = requests.get(
             f"http://localhost:{_MEMCORE_PORT}/agentmemory/command/history",
@@ -364,3 +373,8 @@ def rtk_discover(since_hours: int = 24) -> str:
         "\nFix: ensure AGENTS.md instructs agy to use rtk_run_command for these commands."
     )
     return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    write_log("pyrtk", "MCP server initialized successfully")
+    mcp.run()
