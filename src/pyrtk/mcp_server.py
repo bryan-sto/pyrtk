@@ -115,7 +115,9 @@ def rtk_run_command(command: str, cwd: str = ".") -> str:
         return err
 
     try:
-        args = shlex.split(command)
+        import platform
+        is_windows = platform.system() == "Windows"
+        args = [a.strip('"\'') for a in shlex.split(command, posix=not is_windows)]
     except ValueError as e:
         return f"Error: could not parse command: {e}"
 
@@ -316,7 +318,9 @@ def rtk_passthrough(command: str, cwd: str = ".") -> str:
         return err
 
     try:
-        args = shlex.split(command)
+        import platform
+        is_windows = platform.system() == "Windows"
+        args = [a.strip('"\'') for a in shlex.split(command, posix=not is_windows)]
     except ValueError as e:
         return f"Error: could not parse command: {e}"
 
