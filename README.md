@@ -2,7 +2,7 @@
 
 A local proxy CLI and Model Context Protocol (MCP) server designed to intercept and compress development command outputs. It reduces context token usage by 60%–95% before output enters the LLM's context window.
 
-This project is a Python-based implementation and extension of the original Rust-based [rtk (Rust Token Killer)](https://github.com/coder/rtk).
+This project is intended as a learning experience and was 100% vibe coded with Gemini. It is a Python-based implementation and extension of the original Rust-based [rtk (Rust Token Killer)](https://github.com/coder/rtk).
 
 ---
 
@@ -106,3 +106,4 @@ Add `rtk-mcp` to your LLM client configuration (e.g. `claude_desktop_config.json
 - **Token Estimator**: The project uses custom token estimation logic in `src/pyrtk/core/utils.py` to calculate raw/filtered context sizes and log the savings ratio.
 - **MemCore Tracking Daemon**: Commands run under `rtk_run_command` trigger background daemon threads to report telemetry to a local MemCore SQLite logger on port `3111` (or `MEMCORE_PORT` env override).
 - **Windows Shell Parsing**: The MCP command parser uses `shlex.split` tuned for Windows compatibility, preserving quoted arguments and handling backslashes correctly.
+
