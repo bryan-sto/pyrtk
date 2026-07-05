@@ -2,7 +2,7 @@
 
 A local proxy CLI and Model Context Protocol (MCP) server designed to intercept and compress development command outputs. It reduces context token usage by 60%–95% before output enters the LLM's context window.
 
-This project is intended as a learning experience and was 100% vibe coded with Gemini. It is a Python-based implementation and extension of the original Rust-based [rtk (Rust Token Killer)](https://github.com/coder/rtk).
+This project is intended as a learning experience in writing MCP servers and CLI proxies, and was 100% vibe coded with Gemini. It is a Python-based implementation and extension of the original Rust-based [rtk (Rust Token Killer)](https://github.com/coder/rtk).
 
 ---
 
