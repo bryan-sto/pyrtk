@@ -200,3 +200,132 @@ def test_track_memcore_down(monkeypatch):
     from src.pyrtk.tracker import track
     # Should not raise exception
     track("git status", "pyrtk git status", "raw", "filtered", 10)
+
+
+# ── Background Process & Registry Tests ───────────────────────────────────────
+
+def test_registry_basic(tmp_path):
+    from src.pyrtk.registry import ProcessRegistry
+    import subprocess
+    import sys
+
+    reg = ProcessRegistry(db_dir=tmp_path)
+    
+    # Start a dummy process
+    proc = subprocess.Popen([sys.executable, "-c", "print('hello')"], stdout=subprocess.PIPE)
+    proc.wait()
+
+    handle_id = reg.register(proc, ["dummy"], "stdout.log", "stderr.log")
+    assert handle_id is not None
+
+    entry = reg.get(handle_id)
+    assert entry.pid == proc.pid
+    assert entry.cmd == ["dummy"]
+
+    reg.update_status(handle_id, 123.45, 0)
+    entry2 = reg.get(handle_id)
+    assert entry2.exit_code == 0
+    assert entry2.ended_at == 123.45
+
+
+def test_rtk_run_background_and_check(tmp_path):
+    from src.pyrtk.mcp_server import rtk_run_command, rtk_check_background
+    import json
+    import sys
+    import time
+
+    # Run background python sleep process
+    cmd = f'"{sys.executable}" -c "import time; time.sleep(0.1); print(\'done\')"'
+    res_str = rtk_run_command(cmd, cwd=str(tmp_path), background=True)
+    res = json.loads(res_str)
+
+    assert "handle_id" in res
+    assert "pid" in res
+
+    handle_id = res["handle_id"]
+
+    # Check background status (should be alive)
+    status_str = rtk_check_background(handle_id)
+    status = json.loads(status_str)
+    assert status["pid"] == res["pid"]
+    assert status["alive"] is True
+
+    # Wait for completion (up to 3 seconds)
+    status2 = None
+    for _ in range(30):
+        status_str2 = rtk_check_background(handle_id)
+        status2 = json.loads(status_str2)
+        if not status2["alive"]:
+            break
+        time.sleep(0.1)
+
+    assert status2 is not None
+    assert status2["alive"] is False
+    assert status2["exit_code"] == 0
+    assert "done" in status2["stdout_tail"]
+
+
+# ── JSON Columnar Compressor & CCR Cache Tests ───────────────────────────────
+
+def test_ccr_store_and_retrieve(tmp_path):
+    from src.pyrtk.registry import ProcessRegistry
+    import time
+    
+    reg = ProcessRegistry(db_dir=tmp_path)
+    data = {"some": "data", "list": [1, 2, 3]}
+    
+    ref = reg.ccr_store(data, ttl=5)
+    assert ref.startswith("ccr_")
+    
+    retrieved = reg.ccr_retrieve(ref)
+    assert retrieved == data
+
+    # Test expiration
+    ref_expired = reg.ccr_store(data, ttl=-1)
+    with pytest.raises(KeyError, match="expired"):
+        reg.ccr_retrieve(ref_expired)
+
+
+def test_compress_json_columnar(tmp_path):
+    from src.pyrtk.core.json_compress import compress_json
+    from src.pyrtk.registry import registry
+    
+    # Temporarily redirect registry db path to tmp_path for isolation
+    old_db = registry.db_path
+    registry.db_path = tmp_path / "test_registry.db"
+    registry._init_db()
+
+    try:
+        # Create homogeneous array of 30 dicts (oversized)
+        data = [
+            {"id": i, "status": "active", "tag": "test" if i % 10 == 0 else "default"}
+            for i in range(30)
+        ]
+        
+        res = compress_json(data, max_rows=10)
+        compressed = res["compressed"]
+        
+        assert "schema" in compressed
+        assert "rows" in compressed
+        assert "defaults" in compressed
+        
+        # Dominant key "status" is "active" across 100% of rows -> not in schema, only in defaults
+        assert "status" in compressed["defaults"]
+        assert "status" not in compressed["schema"]
+        
+        # "tag" is "default" in 27/30 (>90%) -> in defaults, and in schema to show deviations
+        assert "tag" in compressed["defaults"]
+        assert "tag" in compressed["schema"]
+        
+        # Truncation: should have keep_first and keep_last, plus omitted placeholder
+        rows = compressed["rows"]
+        assert len(rows) == 11  # 5 + 1 placeholder + 5
+        assert "ref" in rows[5]
+        assert rows[5]["omitted"] == 20
+        
+        # Retrieve omitted data from cache
+        omitted = registry.ccr_retrieve(rows[5]["ref"])
+        assert len(omitted) == 20
+        assert omitted[0]["id"] == 5
+    finally:
+        registry.db_path = old_db

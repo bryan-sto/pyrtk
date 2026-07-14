@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import itertools
+import json
 import logging
 import os
 import re
@@ -96,7 +97,7 @@ def _validate_cwd(cwd: str) -> str | None:
 
 
 @mcp.tool()
-def rtk_run_command(command: str, cwd: str = ".") -> str:
+def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> str:
     """Run a shell command with automatic token compression and MemCore logging.
 
     Supports: git, pytest, ruff, grep/rg, find, pip/uv, docker, ls,
@@ -106,9 +107,10 @@ def rtk_run_command(command: str, cwd: str = ".") -> str:
     Args:
         command: Full shell command string. Quoted arguments are supported.
         cwd:     Working directory for the command. Defaults to current directory.
+        background: If True, run detached in background and return PID and handle.
 
     Returns:
-        Compressed command output as a string.
+        Compressed command output as a string (or JSON with background handle if detached).
     """
     err = _validate_cwd(cwd)
     if err:
@@ -123,6 +125,55 @@ def rtk_run_command(command: str, cwd: str = ".") -> str:
 
     if not args:
         return ""
+
+    # Auto-detect background processes
+    if not background:
+        bg_patterns = [
+            r"\b(npm|yarn|pnpm|bun)\s+(run\s+)?(dev|start|watch)\b",
+            r"\bdocker\s+compose\s+up\b",
+            r"\bdocker-compose\s+up\b",
+            r"\b(uvicorn|gunicorn|fastapi\s+dev)\b",
+            r"\bpython\s+-m\s+http\.server\b",
+            r"\bnode\s+--watch\b"
+        ]
+        if any(re.search(pat, command) for pat in bg_patterns):
+            background = True
+
+    if background:
+        log_dir = Path(cwd).resolve() / ".pyrtk_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        import uuid
+        h_suffix = uuid.uuid4().hex[:8]
+        stdout_path = log_dir / f"{args[0]}_{h_suffix}_stdout.log"
+        stderr_path = log_dir / f"{args[0]}_{h_suffix}_stderr.log"
+
+        kwargs = {}
+        import sys
+        if sys.platform == "win32":
+            import subprocess
+            kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+
+        try:
+            import subprocess
+            with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err:
+                proc = subprocess.Popen(
+                    args,
+                    stdout=out,
+                    stderr=err,
+                    stdin=subprocess.DEVNULL,
+                    close_fds=True,
+                    cwd=cwd,
+                    **kwargs,
+                )
+            from .registry import registry
+            handle_id = registry.register(proc, args, str(stdout_path), str(stderr_path))
+            write_log("BACKGROUND", f"Started background process: command=\"{command}\", pid={proc.pid}, handle_id={handle_id}")
+            return json.dumps({"handle_id": handle_id, "pid": proc.pid})
+        except Exception as ex:
+            write_log("BACKGROUND ERROR", f"Failed to start background process: {ex}")
+            return json.dumps({"error": f"Failed to start background process: {ex}"})
 
     main_cmd = args[0]
     cmd_args = args[1:]
@@ -273,6 +324,16 @@ def rtk_run_command(command: str, cwd: str = ".") -> str:
         write_log("FILTER ERROR", f"{main_cmd} - filter failed: {str(e)}")
         filtered = raw
 
+    # Automatically compress JSON output from any command
+    try:
+        if filtered.strip() and filtered.strip()[0] in ("{", "["):
+            json_data = json.loads(filtered)
+            from .core.json_compress import compress_json
+            res = compress_json(json_data)
+            filtered = json.dumps(res["compressed"], indent=2)
+    except Exception:
+        pass
+
     _log(command, cwd, raw, filtered, exec_ms)
     return filtered
 
@@ -381,6 +442,90 @@ def rtk_discover(since_hours: int = 24) -> str:
         "\nFix: ensure AGENTS.md instructs agy to use rtk_run_command for these commands."
     )
     return "\n".join(lines)
+
+
+@mcp.tool()
+def rtk_check_background(handle_id: str, tail_lines: int = 20) -> str:
+    """Check the status of a background process by handle_id.
+
+    Args:
+        handle_id: The handle_id returned when the command was launched.
+        tail_lines: Number of lines to tail from stdout/stderr. Defaults to 20.
+
+    Returns:
+        JSON string representing the process status.
+    """
+    try:
+        from .registry import registry
+        entry = registry.get(handle_id)
+    except KeyError:
+        return json.dumps({"error": f"Unknown handle_id: {handle_id}"})
+
+    import psutil
+    proc = entry.live_handle
+
+    if proc is not None:
+        exit_code = proc.poll()
+        alive = exit_code is None
+        if not alive:
+            # Clean exit detection — write-through ended_at and exit_code
+            import time
+            registry.update_status(handle_id, time.time(), exit_code)
+    else:
+        # Check by pid
+        alive = psutil.pid_exists(entry.pid)
+        exit_code = entry.exit_code
+        if not alive and exit_code is None:
+            # Write-through -1 as exit code
+            import time
+            registry.update_status(handle_id, time.time(), -1)
+            exit_code = -1
+
+    stdout_tail = _tail(entry.stdout_log, tail_lines)
+    stderr_tail = _tail(entry.stderr_log, tail_lines)
+
+    return json.dumps({
+        "pid": entry.pid,
+        "alive": alive,
+        "stdout_tail": stdout_tail,
+        "stderr_tail": stderr_tail,
+        "exit_code": exit_code,
+    })
+
+
+def _tail(path: str, n: int) -> str:
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            # Bounded seek-from-end (no full-file read)
+            # Estimate block size: about 128 bytes per line, but at least 8KB
+            block = min(size, max(8192, 128 * n))
+            f.seek(-block, os.SEEK_END)
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+            return "\n".join(lines[-n:])
+    except Exception:
+        return ""
+
+
+@mcp.tool()
+def rtk_retrieve(ref: str) -> str:
+    """Retrieve the original uncompressed block corresponding to a CCR ref key.
+
+    Args:
+        ref: The cache reference string (e.g. ccr_<hash>).
+
+    Returns:
+        JSON string representing the original cache content.
+    """
+    try:
+        from .registry import registry
+        data = registry.ccr_retrieve(ref)
+        return json.dumps(data, indent=2)
+    except KeyError as e:
+        return json.dumps({"error": str(e)})
 
 
 if __name__ == "__main__":

@@ -35,12 +35,22 @@ logs the token usage so `rtk_discover` can surface it as a coverage gap.
 - `rtk_gain()` — check token savings for this session
 - `rtk_passthrough("cmd")` — bypass filtering when you need full raw output
 - `rtk_discover(since_hours=24)` — find commands that bypassed pyrtk
+- `rtk_check_background(handle_id)` — check status and tail logs of background tasks
+- `rtk_retrieve(ref)` — recover original uncompressed json/text from CCR cache
 
 ## Reading Source Files
 
 Prefer `rtk_run_command("read <file>")` over reading files directly.
 Use `aggressive` level when you only need function signatures:
 `rtk_run_command("read src/main.py aggressive")`
+
+## CacheAligner (Prefix Stabilization)
+
+When constructing context prompts or injecting tool results:
+1. Put static blocks (rules, schemas, tool descriptions) first. Make them byte-identical across calls.
+2. Put dynamic content (e.g. tool output, file contents) after the static prefix. Never interleave it.
+3. Keep timestamps, session IDs, and transient data at the very end.
+This ensures optimal prefix caching by the LLM.
 
 ## Notes
 
