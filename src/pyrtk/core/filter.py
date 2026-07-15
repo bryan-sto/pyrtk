@@ -93,7 +93,12 @@ def code_filter(content: str, language: str, level: FilterLevel = FilterLevel.MI
 
 
 def _minimal_filter(content: str, language: str) -> str:
-    """Strip comments and collapse 3+ blank lines into one."""
+    """Strip comments and collapse 3+ blank lines into one.
+
+    NOTE: This is line-based comment/brace stripping and is not fully string-literal-aware.
+    Lines starting with comment markers inside multi-line strings or template literals
+    might be stripped.
+    """
     line_prefix = _LANGUAGE_LINE_COMMENT.get(language)
     if not line_prefix:
         return content
@@ -105,9 +110,16 @@ def _minimal_filter(content: str, language: str) -> str:
         content = re.sub(r"^=begin.*?^=end", "", content, flags=re.MULTILINE | re.DOTALL)
 
     result = []
+    in_triple_quote = False
     for line in content.splitlines():
         stripped = line.strip()
-        if stripped.startswith(line_prefix):
+        
+        # Avoid stripping comments inside Python multi-line triple-quoted strings
+        if language == "python" and stripped:
+            if stripped.count('"""') % 2 == 1 or stripped.count("'''") % 2 == 1:
+                in_triple_quote = not in_triple_quote
+
+        if not in_triple_quote and stripped.startswith(line_prefix):
             continue
         result.append(line)
 
@@ -193,7 +205,12 @@ def _aggressive_python(content: str) -> str:
 
 
 def _aggressive_brace(content: str) -> str:
-    """Brace-delimited languages: keep signatures, replace bodies with { ... }."""
+    """Brace-delimited languages: keep signatures, replace bodies with { ... }.
+
+    NOTE: This is line-based brace depth tracking and is not string-literal-aware.
+    Curly braces '{' or '}' appearing inside string literals or comments will throw
+    off depth tracking.
+    """
     _SIG_RE = re.compile(
         r"\b(public|private|protected|internal|static|async|"
         r"func|fn|fun|void|int|string|bool|"
@@ -217,12 +234,11 @@ def _aggressive_brace(content: str) -> str:
             if (is_sig or is_structural) and open_b > close_b:
                 body_start_depth = brace_depth
                 result.append("  ...")
+            brace_depth += open_b - close_b
         else:
             brace_depth += open_b - close_b
             if brace_depth <= body_start_depth:
                 result.append(line)
                 body_start_depth = None
-
-        brace_depth += open_b - close_b
 
     return "\n".join(result)

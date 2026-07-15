@@ -363,3 +363,73 @@ def test_compress_json_recursive(tmp_path):
         assert len(items_comp["rows"]) == 11
     finally:
         registry.db_path = old_db
+
+
+def test_read_size_guard(tmp_path, monkeypatch):
+    from src.pyrtk.mcp_server import rtk_run_command
+    # Set limit to 20 characters
+    monkeypatch.setenv("RTK_READ_MAX_CHARS", "20")
+    
+    test_file = tmp_path / "large_file.txt"
+    test_file.write_text("abcdefghijklmnopqrstuvwxyz", encoding="utf-8")
+    
+    res = rtk_run_command(f"read {test_file.name}", cwd=str(tmp_path))
+    assert "[... file truncated at 20 chars]" in res
+    assert "abcdefghijklmnopqrst" in res
+    assert "z" not in res
+
+
+def test_git_optimised_command():
+    from src.pyrtk.cmds.git import get_optimised_git_command
+    
+    assert get_optimised_git_command(["git", "status"]) == ["git", "status", "--porcelain"]
+    assert get_optimised_git_command(["git", "diff"]) == ["git", "diff", "--stat"]
+    assert get_optimised_git_command(["git", "diff", "HEAD~1"]) == ["git", "diff", "--stat", "HEAD~1"]
+    assert get_optimised_git_command(["git", "diff", "--name-only"]) == ["git", "diff", "--name-only"]
+    assert get_optimised_git_command(["git", "log"]) == ["git", "log", "--oneline"]
+    assert get_optimised_git_command(["git", "log", "--oneline"]) == ["git", "log", "--oneline"]
+    assert get_optimised_git_command(["git", "log", "--format=%s"]) == ["git", "log", "--format=%s"]
+
+
+def test_git_diff_filter_custom_options():
+    from src.pyrtk.cmds.git import _filter_diff
+    
+    # Custom stat option `--name-only` should pass through verbatim
+    assert _filter_diff("src/foo.py\nsrc/bar.py", ["--name-only"]) == "src/foo.py\nsrc/bar.py"
+    # Unified patch `-p` option should truncate to 400 chars
+    long_diff = "diff --git a/foo b/bar\n" + "a" * 500
+    assert len(_filter_diff(long_diff, ["-p"])) == 400
+
+
+def test_aggressive_brace_nesting():
+    from src.pyrtk.core.filter import _aggressive_brace
+    
+    # Body containing nested braces
+    content = (
+        "void process() {\n"
+        "    if (true) {\n"
+        "        doSomething();\n"
+        "    }\n"
+        "}\n"
+    )
+    # Aggressive brace should collapse the body but keep signatures
+    filtered = _aggressive_brace(content)
+    assert "process() {" in filtered
+    assert "  ..." in filtered
+    assert "doSomething" not in filtered
+
+
+def test_minimal_filter_triple_quote():
+    from src.pyrtk.core.filter import _minimal_filter
+    
+    python_code = (
+        'def test():\n'
+        '    """\n'
+        '    This is a docstring\n'
+        '    # not a comment line\n'
+        '    """\n'
+        '    pass\n'
+    )
+    filtered = _minimal_filter(python_code, "python")
+    # Comment prefix '#' inside triple quotes should NOT be stripped
+    assert "# not a comment line" in filtered

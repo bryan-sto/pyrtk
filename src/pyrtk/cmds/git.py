@@ -9,16 +9,34 @@ from ..core.utils import execute_command, strip_ansi
 from ..tracker import track
 
 
+def get_optimised_git_command(args: list[str]) -> list[str]:
+    """Intercepts git status, diff, or log to return the optimised command array."""
+    if not args or args[0] != "git":
+        return args
+    if len(args) < 2:
+        return args
+
+    sub = args[1]
+    if sub == "status":
+        return ["git", "status", "--porcelain"]
+    elif sub == "diff":
+        has_stat_option = any(arg in args for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
+        if not has_stat_option:
+            return ["git", "diff", "--stat"] + args[2:]
+        return args
+    elif sub == "log":
+        has_format = any(a.startswith("--format") or a.startswith("--pretty") or a == "--oneline" for a in args)
+        if not has_format:
+            return ["git", "log", "--oneline"] + args[2:]
+        return args
+    return args
+
+
 def run(args: list[str], verbose: bool = False) -> None:
     sub = args[0] if args else ""
     cmd = ["git"] + args
 
-    if sub == "status":
-        exec_cmd = ["git", "status", "--porcelain"]
-    elif sub == "diff" and len(args) == 1:
-        exec_cmd = ["git", "diff", "--stat"]
-    else:
-        exec_cmd = cmd
+    exec_cmd = get_optimised_git_command(cmd)
 
     t0 = time.time()
     stdout, stderr, code = execute_command(exec_cmd)
@@ -78,6 +96,12 @@ def _filter_log(raw: str) -> str:
 
 
 def _filter_diff(raw: str, args: list[str]) -> str:
+    has_stat_option = any(arg in args for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
+    if has_stat_option:
+        if any(arg in args for arg in ("-p", "--patch")):
+            return raw[:400]
+        return raw
+
     lines = raw.splitlines()
     stats = [l for l in lines if re.match(r'^\s*\d+\s+files? changed', l)]
     if stats:

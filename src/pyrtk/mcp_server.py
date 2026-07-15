@@ -178,22 +178,24 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
     main_cmd = args[0]
     cmd_args = args[1:]
 
+    # Check if the command is ruff check
+    is_ruff_check = False
+    if main_cmd == "ruff":
+        sub = cmd_args[0] if cmd_args else "check"
+        if sub == "check" or (sub not in ("format", "version", "help", "rule") and not sub.startswith("-")):
+            is_ruff_check = True
+
     t0 = time.time()
-    # Check git status or diff to intercept and run optimised calls
-    if main_cmd == "git" and cmd_args:
-        sub = cmd_args[0]
-        if sub == "status":
-            stdout, stderr, code = execute_command(["git", "status", "--porcelain"], cwd=cwd)
-        elif sub == "diff":
-            # Always use --stat for diff under rtk_run_command unless stat option already present
-            diff_args = ["git", "diff"]
-            has_stat_option = any(arg in cmd_args for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
-            if not has_stat_option:
-                diff_args.append("--stat")
-            diff_args.extend(cmd_args[1:])
-            stdout, stderr, code = execute_command(diff_args, cwd=cwd)
-        else:
-            stdout, stderr, code = execute_command(args, cwd=cwd)
+    # Check git status, diff, or log to intercept and run optimised calls
+    if main_cmd == "git":
+        from .cmds.git import get_optimised_git_command
+        exec_cmd = get_optimised_git_command(args)
+        stdout, stderr, code = execute_command(exec_cmd, cwd=cwd)
+    elif is_ruff_check:
+        clean_args = [a for a in cmd_args if a != "check"]
+        clean_args = [a for a in clean_args if not a.startswith("--output-format")]
+        json_cmd = ["ruff", "check", "--output-format", "json"] + clean_args
+        stdout, stderr, code = execute_command(json_cmd, cwd=cwd)
     else:
         stdout, stderr, code = execute_command(args, cwd=cwd)
 
@@ -227,8 +229,8 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
 
         elif main_cmd == "ruff":
             sub = cmd_args[0] if cmd_args else "check"
-            if sub == "check":
-                filtered = _filter_check_json(cmd_args) or _filter_check_text(raw)
+            if is_ruff_check:
+                filtered = _filter_check_json(raw) or _filter_check_text(raw)
             elif sub == "format":
                 filtered = _ruff_format(raw)
             else:
@@ -303,10 +305,19 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
                 try:
                     level = FilterLevel(level_str)
                     file_raw = filepath.read_text(encoding="utf-8", errors="replace")
+                    
+                    max_chars = int(os.getenv("RTK_READ_MAX_CHARS", "50000"))
+                    was_truncated = False
+                    if len(file_raw) > max_chars:
+                        file_raw = file_raw[:max_chars]
+                        was_truncated = True
+
                     lang_ext = filepath.suffix.lower()
                     from src.pyrtk.cmds.read_cmd import LANGUAGE_MAP
                     language = LANGUAGE_MAP.get(lang_ext, "unknown")
                     filtered = code_filter(file_raw, language, level)
+                    if was_truncated:
+                        filtered += f"\n\n[... file truncated at {max_chars} chars]"
                     raw = file_raw
                 except (FileNotFoundError, PermissionError) as e:
                     return f"Error: {e}"

@@ -25,7 +25,14 @@ def run(args: list[str], verbose: bool = False) -> None:
     Falls back to text parsing if JSON mode fails.
     """
     sub = args[0] if args else "check"
-    cmd = ["ruff"] + args
+    is_check = sub == "check" or (sub not in ("format", "version", "help", "rule") and not sub.startswith("-"))
+
+    if is_check:
+        clean_args = [a for a in args if a != "check"]
+        clean_args = [a for a in clean_args if not a.startswith("--output-format")]
+        cmd = ["ruff", "check", "--output-format", "json"] + clean_args
+    else:
+        cmd = ["ruff"] + args
 
     t0 = time.time()
     stdout, stderr, code = execute_command(cmd)
@@ -33,8 +40,8 @@ def run(args: list[str], verbose: bool = False) -> None:
 
     raw = strip_ansi(stdout + stderr)
 
-    if sub == "check":
-        filtered = _filter_check_json(args) or _filter_check_text(raw)
+    if is_check:
+        filtered = _filter_check_json(raw) or _filter_check_text(raw)
     elif sub == "format":
         filtered = _filter_format(raw)
     else:
@@ -51,17 +58,12 @@ def run(args: list[str], verbose: bool = False) -> None:
         raise SystemExit(code)
 
 
-def _filter_check_json(args: list[str]) -> str | None:
-    """Re-run ruff check with --output-format json for reliable structured parsing."""
-    clean_args = [a for a in args[1:] if not a.startswith("--output-format")]
-    json_cmd = ["ruff", "check", "--output-format", "json"] + clean_args
-
-    stdout, _, _ = execute_command(json_cmd)
-
+def _filter_check_json(json_stdout: str) -> str | None:
+    """Parse JSON check violations for reliable structured output."""
     try:
-        violations: list[dict] = json.loads(stdout)
+        violations: list[dict] = json.loads(json_stdout)
     except json.JSONDecodeError:
-        logger.warning("ruff JSON parse failed — falling back to text: %s", stdout[:80])
+        logger.warning("ruff JSON parse failed — falling back to text: %s", json_stdout[:80])
         return None
 
     if not violations:
