@@ -329,3 +329,37 @@ def test_compress_json_columnar(tmp_path):
         assert omitted[0]["id"] == 5
     finally:
         registry.db_path = old_db
+
+
+def test_compress_json_recursive(tmp_path):
+    from src.pyrtk.core.json_compress import compress_json
+    from src.pyrtk.registry import registry
+    
+    old_db = registry.db_path
+    registry.db_path = tmp_path / "test_registry_rec.db"
+    registry._init_db()
+
+    try:
+        # Data wrapped inside nested dictionary and lists
+        nested_data = {
+            "meta": {"code": 200},
+            "response": {
+                "items": [
+                    {"id": i, "status": "active"}
+                    for i in range(30)
+                ]
+            }
+        }
+        
+        res = compress_json(nested_data, max_rows=10)
+        compressed = res["compressed"]
+        
+        # Verify it traversed and compressed the list of dicts under 'items'
+        assert "meta" in compressed
+        assert "response" in compressed
+        items_comp = compressed["response"]["items"]
+        assert "schema" in items_comp
+        assert "defaults" in items_comp
+        assert len(items_comp["rows"]) == 11
+    finally:
+        registry.db_path = old_db

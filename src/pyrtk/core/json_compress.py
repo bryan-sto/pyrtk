@@ -9,11 +9,7 @@ def compress_json(data: any, max_rows: int = 20) -> dict:
     original_str = json.dumps(data)
     orig_tokens = estimate_tokens(original_str)
 
-    # Shape detection
-    if isinstance(data, list) and len(data) > 0 and all(isinstance(x, dict) for x in data):
-        compressed_data = _compress_columnar(data, max_rows)
-    else:
-        compressed_data = _truncate_generic(data, max_rows)
+    compressed_data = _compress_recursive(data, max_rows)
 
     compressed_str = json.dumps(compressed_data, indent=2)
     comp_tokens = estimate_tokens(compressed_str)
@@ -23,6 +19,24 @@ def compress_json(data: any, max_rows: int = 20) -> dict:
         "original_tokens_est": orig_tokens,
         "compressed_tokens_est": comp_tokens
     }
+
+def _is_homogeneous_dict_list(data: any) -> bool:
+    return isinstance(data, list) and len(data) > 0 and all(isinstance(x, dict) for x in data)
+
+def _compress_recursive(data: any, max_rows: int) -> any:
+    """Walk the structure and apply columnar compression to any list-of-dicts found
+    at any depth — not just at the top level. Most real API responses wrap their
+    array under a key (e.g. {"data": [...]}, {"matches": [...]}), so top-level-only
+    detection misses the majority of real-world payloads."""
+    if _is_homogeneous_dict_list(data):
+        return _compress_columnar(data, max_rows)
+    if isinstance(data, dict):
+        return {k: _compress_recursive(v, max_rows) for k, v in data.items()}
+    if isinstance(data, list):
+        if len(data) > max_rows:
+            return _truncate_generic(data, max_rows)
+        return [_compress_recursive(x, max_rows) for x in data]
+    return data
 
 def _compress_columnar(rows: list[dict], max_rows: int) -> dict:
     # 1. Identify all keys
@@ -39,30 +53,32 @@ def _compress_columnar(rows: list[dict], max_rows: int) -> dict:
     # 2. Hoist dominant defaults (>90% frequency)
     for k in all_keys:
         val_counts = {}
+        # Track original (unhashable-safe) values alongside their counting key,
+        # so we never have to guess whether a string was real data or a
+        # serialization workaround — this avoids misinterpreting a genuine
+        # string value like "[DEPRECATED]" as JSON to be parsed back out.
+        val_by_key = {}
         for r in rows:
             val = r.get(k)
-            # Use string representation of value for dict keys to handle unhashable types
             try:
                 hash(val)
                 key_val = val
             except TypeError:
-                key_val = json.dumps(val)
+                # Unhashable (dict/list) — use a sentinel-prefixed serialization
+                # that can never collide with a real string value.
+                key_val = "\x00json\x00" + json.dumps(val, sort_keys=True)
             val_counts[key_val] = val_counts.get(key_val, 0) + 1
+            val_by_key.setdefault(key_val, val)
 
         if not val_counts:
             continue
 
-        dominant_val = max(val_counts, key=val_counts.get)
-        dominant_count = val_counts[dominant_val]
+        dominant_key = max(val_counts, key=val_counts.get)
+        dominant_count = val_counts[dominant_key]
+        dominant_val = val_by_key[dominant_key]
 
         # Check if dominant value is >=90% of rows
         if dominant_count / total_rows >= 0.9:
-            # If dominant_val was serialized, deserialize it
-            if isinstance(dominant_val, str) and dominant_val.startswith(("[", "{")):
-                try:
-                    dominant_val = json.loads(dominant_val)
-                except Exception:
-                    pass
             defaults[k] = dominant_val
             
             # If not 100% identical, we keep key in schema to show deviations

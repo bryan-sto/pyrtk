@@ -207,19 +207,18 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
             sub = cmd_args[0] if cmd_args else ""
             if sub == "status":
                 filtered = _filter_status(raw)
-                # Estimate baseline for status token calculation
-                num_lines = len(raw.splitlines())
-                baseline_len = 500 + num_lines * 80
-                raw = " " * baseline_len  # set raw to baseline length for estimate_tokens
+                # NOTE: previously fabricated a baseline_len estimate here instead of
+                # using the real raw output, which inflated reported savings. Use the
+                # actual porcelain output length so rtk_gain() reports honest numbers.
             elif sub == "log":
                 filtered = _filter_log(raw)
             elif sub in ("add", "commit", "push", "pull"):
                 filtered = _filter_simple(raw, sub)
             elif sub == "diff":
                 filtered = _filter_diff(raw, cmd_args)
-                if len(cmd_args) == 1:
-                    # Estimate baseline for diff token calculation
-                    raw = " " * (len(raw) * 5)
+                # NOTE: previously fabricated raw = " " * (len(raw) * 5) here to
+                # inflate the reported baseline. Use the actual diff output length
+                # so savings numbers reflect what was really filtered.
             else:
                 filtered = raw
 
@@ -324,15 +323,19 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
         write_log("FILTER ERROR", f"{main_cmd} - filter failed: {str(e)}")
         filtered = raw
 
-    # Automatically compress JSON output from any command
-    try:
-        if filtered.strip() and filtered.strip()[0] in ("{", "["):
-            json_data = json.loads(filtered)
-            from .core.json_compress import compress_json
-            res = compress_json(json_data)
-            filtered = json.dumps(res["compressed"], indent=2)
-    except Exception:
-        pass
+    # Automatically compress JSON output from any command — except `read`, which
+    # returns actual file content (e.g. a real .json config file). Compressing
+    # that would silently reformat/truncate a file the agent asked to see verbatim,
+    # rather than a tool/API response where lossy summarization is appropriate.
+    if main_cmd != "read":
+        try:
+            if filtered.strip() and filtered.strip()[0] in ("{", "["):
+                json_data = json.loads(filtered)
+                from .core.json_compress import compress_json
+                res = compress_json(json_data)
+                filtered = json.dumps(res["compressed"], indent=2)
+        except Exception:
+            pass
 
     _log(command, cwd, raw, filtered, exec_ms)
     return filtered

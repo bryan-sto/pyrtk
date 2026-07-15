@@ -174,5 +174,53 @@ class ProcessRegistry:
                     """)
         except Exception:
             pass
+        self.process_sweep()
+
+    def process_sweep(self, max_age_seconds: int = 7 * 86400) -> None:
+        """Evict finished background_processes rows older than max_age_seconds
+        and delete their stdout/stderr log files. Without this, both the sqlite
+        table and .pyrtk_logs/ grow unbounded for any project that uses
+        background=True regularly (dev servers, uv run, etc.)."""
+        cutoff = time.time() - max_age_seconds
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT handle_id, stdout_log, stderr_log FROM background_processes
+                    WHERE ended_at IS NOT NULL AND ended_at < ?
+                    """,
+                    (cutoff,)
+                )
+                rows = cursor.fetchall()
+                for handle_id, stdout_log, stderr_log in rows:
+                    for log_path in (stdout_log, stderr_log):
+                        try:
+                            p = Path(log_path)
+                            if p.exists():
+                                p.unlink()
+                        except Exception:
+                            pass
+                conn.execute(
+                    "DELETE FROM background_processes WHERE ended_at IS NOT NULL AND ended_at < ?",
+                    (cutoff,)
+                )
+                # Also clean up rows that never got an ended_at but are clearly
+                # stale (started long ago and the live handle is gone) — these
+                # are processes whose exit was never observed, e.g. server restart.
+                stale_cutoff = time.time() - (max_age_seconds * 4)
+                cursor.execute(
+                    "SELECT handle_id FROM background_processes WHERE ended_at IS NULL AND started_at < ?",
+                    (stale_cutoff,)
+                )
+                for (handle_id,) in cursor.fetchall():
+                    self._live_handles.pop(handle_id, None)
+                conn.execute(
+                    "UPDATE background_processes SET ended_at = ?, exit_code = -1 "
+                    "WHERE ended_at IS NULL AND started_at < ?",
+                    (time.time(), stale_cutoff)
+                )
+        except Exception:
+            pass
 
 registry = ProcessRegistry()
