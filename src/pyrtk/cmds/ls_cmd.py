@@ -58,7 +58,7 @@ def run(args: list[str], verbose: bool = False) -> None:
 
     if verbose:
         # Since it's a python tool, raw is same as filtered
-        print(f"[pyrtk] ls → 0% saved", file=sys.stderr)
+        print("[pyrtk] ls → 0% saved", file=sys.stderr)
 
     print(filtered)
     exec_ms = int((time.time() - t0) * 1000)

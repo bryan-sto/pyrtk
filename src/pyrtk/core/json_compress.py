@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+from typing import Any
+
 from .utils import estimate_tokens
 
-def compress_json(data: any, max_rows: int = 20) -> dict:
+
+def compress_json(data: Any, max_rows: int = 20) -> dict[str, Any]:
     """Compress JSON data by converting arrays of dicts to columnar form and applying CCR truncation."""
     original_str = json.dumps(data)
     orig_tokens = estimate_tokens(original_str)
@@ -17,13 +20,15 @@ def compress_json(data: any, max_rows: int = 20) -> dict:
     return {
         "compressed": compressed_data,
         "original_tokens_est": orig_tokens,
-        "compressed_tokens_est": comp_tokens
+        "compressed_tokens_est": comp_tokens,
     }
 
-def _is_homogeneous_dict_list(data: any) -> bool:
+
+def _is_homogeneous_dict_list(data: Any) -> bool:
     return isinstance(data, list) and len(data) > 0 and all(isinstance(x, dict) for x in data)
 
-def _compress_recursive(data: any, max_rows: int) -> any:
+
+def _compress_recursive(data: Any, max_rows: int) -> Any:
     """Walk the structure and apply columnar compression to any list-of-dicts found
     at any depth — not just at the top level. Most real API responses wrap their
     array under a key (e.g. {"data": [...]}, {"matches": [...]}), so top-level-only
@@ -38,26 +43,26 @@ def _compress_recursive(data: any, max_rows: int) -> any:
         return [_compress_recursive(x, max_rows) for x in data]
     return data
 
-def _compress_columnar(rows: list[dict], max_rows: int) -> dict:
+def _compress_columnar(rows: list[dict[str, Any]], max_rows: int) -> dict[str, Any]:
     # 1. Identify all keys
-    all_keys = []
+    all_keys: list[str] = []
     for r in rows:
         for k in r.keys():
             if k not in all_keys:
                 all_keys.append(k)
 
     total_rows = len(rows)
-    defaults = {}
-    schema = []
+    defaults: dict[str, Any] = {}
+    schema: list[str] = []
 
     # 2. Hoist dominant defaults (>90% frequency)
     for k in all_keys:
-        val_counts = {}
+        val_counts: dict[Any, int] = {}
         # Track original (unhashable-safe) values alongside their counting key,
         # so we never have to guess whether a string was real data or a
         # serialization workaround — this avoids misinterpreting a genuine
         # string value like "[DEPRECATED]" as JSON to be parsed back out.
-        val_by_key = {}
+        val_by_key: dict[Any, Any] = {}
         for r in rows:
             val = r.get(k)
             try:
@@ -73,14 +78,14 @@ def _compress_columnar(rows: list[dict], max_rows: int) -> dict:
         if not val_counts:
             continue
 
-        dominant_key = max(val_counts, key=val_counts.get)
+        dominant_key = max(val_counts, key=lambda x: val_counts[x])
         dominant_count = val_counts[dominant_key]
         dominant_val = val_by_key[dominant_key]
 
         # Check if dominant value is >=90% of rows
         if dominant_count / total_rows >= 0.9:
             defaults[k] = dominant_val
-            
+
             # If not 100% identical, we keep key in schema to show deviations
             if dominant_count < total_rows:
                 schema.append(k)
@@ -89,27 +94,28 @@ def _compress_columnar(rows: list[dict], max_rows: int) -> dict:
 
     # 3. Truncation and CCR caching
     has_truncation = len(rows) > max_rows
+    target_rows: list[Any]
     if has_truncation:
         half = max_rows // 2
-        keep_first = rows[:half]
-        keep_last = rows[-half:]
-        omitted = rows[half:-half]
+        keep_first: list[Any] = rows[:half]
+        keep_last: list[Any] = rows[-half:]
+        omitted: list[Any] = rows[half:-half]
 
         from ..registry import registry
         ref = registry.ccr_store(omitted, source_tool="json_compress")
-        
+
         target_rows = keep_first + [{"ref": ref, "omitted": len(omitted)}] + keep_last
     else:
-        target_rows = rows
+        target_rows = list(rows)
 
     # 4. Generate compressed rows format
-    formatted_rows = []
+    formatted_rows: list[Any] = []
     for r in target_rows:
         if isinstance(r, dict) and "ref" in r and "omitted" in r:
             # Omitted placeholder
             formatted_rows.append(r)
         else:
-            row_vals = []
+            row_vals: list[Any] = []
             for k in schema:
                 val = r.get(k)
                 if k in defaults and val == defaults[k]:
@@ -119,15 +125,16 @@ def _compress_columnar(rows: list[dict], max_rows: int) -> dict:
                     row_vals.append(val)
             formatted_rows.append(row_vals)
 
-    res = {
+    res: dict[str, Any] = {
         "schema": schema,
-        "rows": formatted_rows
+        "rows": formatted_rows,
     }
     if defaults:
         res["defaults"] = defaults
     return res
 
-def _truncate_generic(data: any, max_rows: int) -> any:
+
+def _truncate_generic(data: Any, max_rows: int) -> Any:
     """Truncate lists or dicts that are not homogeneous arrays of dicts."""
     if isinstance(data, list):
         if len(data) > max_rows:
@@ -135,10 +142,10 @@ def _truncate_generic(data: any, max_rows: int) -> any:
             keep_first = data[:half]
             keep_last = data[-half:]
             omitted = data[half:-half]
-            
+
             from ..registry import registry
             ref = registry.ccr_store(omitted, source_tool="json_compress")
-            
+
             return keep_first + [{"ref": ref, "omitted": len(omitted)}] + keep_last
         else:
             return [_truncate_generic(x, max_rows) for x in data]

@@ -41,7 +41,8 @@ def run(args: list[str], verbose: bool = False) -> None:
     raw = strip_ansi(stdout + stderr)
 
     if is_check:
-        filtered = _filter_check_json(raw) or _filter_check_text(raw)
+        clean_stdout = strip_ansi(stdout)
+        filtered = _filter_check_json(clean_stdout) or _filter_check_text(raw)
     elif sub == "format":
         filtered = _filter_format(raw)
     else:
@@ -63,7 +64,7 @@ def _filter_check_json(json_stdout: str) -> str | None:
     try:
         violations: list[dict] = json.loads(json_stdout)
     except json.JSONDecodeError:
-        logger.warning("ruff JSON parse failed — falling back to text: %s", json_stdout[:80])
+        logger.warning("ruff JSON parse failed - falling back to text: %s", json_stdout[:80])
         return None
 
     if not violations:
@@ -79,7 +80,7 @@ def _filter_check_json(json_stdout: str) -> str | None:
         by_rule[rule].append(f"  {filename}:{row} {msg}")
 
     total = len(violations)
-    lines = [f"ruff: {total} violation(s) — {len(by_rule)} rule(s)\n"]
+    lines = [f"ruff: {total} violation(s) - {len(by_rule)} rule(s)\n"]
     shown = 0
 
     for rule, instances in sorted(by_rule.items(), key=lambda x: -len(x[1])):
@@ -92,14 +93,14 @@ def _filter_check_json(json_stdout: str) -> str | None:
         if shown >= _MAX_VIOLATIONS:
             remaining = total - shown
             if remaining > 0:
-                lines.append(f"\n[{remaining} violations omitted — run ruff check directly]")
+                lines.append(f"\n[{remaining} violations omitted - run ruff check directly]")
             break
 
     return "\n".join(lines)
 
 
 def _filter_check_text(raw: str) -> str:
-    """Fallback text parser — group violations by file."""
+    """Fallback text parser - group violations by file."""
     _LINE_RE = re.compile(r"^(.+?):(\d+):\d+:\s+([A-Z]\d+)\s+(.+)$")
     by_file: dict[str, int] = defaultdict(int)
 

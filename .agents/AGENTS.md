@@ -15,6 +15,7 @@ This applies to every command listed below.
 |---|---|
 | git | `rtk_run_command("git status", cwd="/path/to/project")` |
 | pytest | `rtk_run_command("pytest tests/ -x")` |
+| cargo | `rtk_run_command("cargo test")` |
 | ruff | `rtk_run_command("ruff check src/")` |
 | grep / rg | `rtk_run_command("rg 'pattern' src/")` |
 | find | `rtk_run_command("find . -name '*.py'")` |
@@ -36,6 +37,7 @@ logs the token usage so `rtk_discover` can surface it as a coverage gap.
 - `rtk_passthrough("cmd")` — bypass filtering when you need full raw output
 - `rtk_discover(since_hours=24)` — find commands that bypassed pyrtk
 - `rtk_check_background(handle_id)` — check status and tail logs of background tasks
+- `rtk_kill_background(handle_id)` — terminate a running background process and its children
 - `rtk_retrieve(ref)` — recover original uncompressed json/text from CCR cache
 
 ## Reading Source Files

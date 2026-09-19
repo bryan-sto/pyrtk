@@ -19,4 +19,23 @@ rtk-mcp = "mcp_server:mcp.run"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

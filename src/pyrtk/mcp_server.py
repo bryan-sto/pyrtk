@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 import datetime
-import itertools
 import json
-import logging
 import os
 import re
 import shlex
@@ -15,41 +13,30 @@ from pathlib import Path
 import requests
 from mcp.server.fastmcp import FastMCP
 
-from .core.filter import FilterLevel, code_filter, dedup
-from .core.utils import execute_command, estimate_tokens, strip_ansi
-from .cmds.git import _filter_status, _filter_log, _filter_diff, _filter_simple
-from .cmds.pytest_cmd import _filter_pytest
-from .cmds.docker_cmd import _filter_ps
-from .cmds.ruff_cmd import _filter_check_json, _filter_check_text, _filter_format as _ruff_format
-from .cmds.grep_cmd import _filter_grep
-from .cmds.find_cmd import _filter_find
-from .cmds.pip_cmd import _filter_list as _pip_list, _filter_show as _pip_show
-from .cmds.err_cmd import _filter_errors
-from .cmds.test_cmd import _filter_test_output
+from .core.dispatcher import dispatch_command
+from .core.utils import estimate_tokens, execute_command, get_execution_env, scrub_secrets
 
-# Custom logging matching memcore.log style
+
+# Custom logging matching memcore.log style with automatic rotation
 def write_log(tag: str, msg: str) -> None:
-    """Write log messages to pyrtk.log in project root matching MemCore format."""
+    """Write log messages to pyrtk.log in project root matching MemCore format with rotation."""
     try:
         now_str = datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         log_path = Path(__file__).parent.parent.parent / "pyrtk.log"
+        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+            rot_path = log_path.with_suffix(".log.1")
+            if rot_path.exists():
+                rot_path.unlink()
+            log_path.rename(rot_path)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"[{now_str}] [{tag}] {msg}\n")
     except Exception:
         pass
 
+
 mcp = FastMCP("pyrtk")
 
 _MEMCORE_PORT = os.getenv("MEMCORE_PORT", "3111")
-_SECRET_RE = re.compile(
-    r"(bearer|authorization|token|password|secret|key|auth)(?:\s+|=)\S+",
-    re.IGNORECASE,
-)
-
-
-def _scrub(cmd: str) -> str:
-    """Remove credential-like strings before logging to MemCore."""
-    return _SECRET_RE.sub(r"\1 [REDACTED]", cmd)
 
 
 def _post_to_memcore(payload: dict) -> None:
@@ -65,16 +52,33 @@ def _post_to_memcore(payload: dict) -> None:
 
 
 def _log(command: str, cwd: str, raw: str, filtered: str, exec_ms: int) -> None:
-    """Build and fire the MemCore tracking payload asynchronously."""
+    """Build and fire the MemCore tracking payload asynchronously and save locally."""
     inp = estimate_tokens(raw)
     out = estimate_tokens(filtered)
     saved = max(0, inp - out)
     pct = round((saved / inp * 100) if inp > 0 else 0.0, 1)
 
+    project = Path(cwd).resolve().name
+    now_str = datetime.datetime.now(datetime.UTC).isoformat() + "Z"
+    clean_cmd = scrub_secrets(command)
+
+    # Persist locally in SQLite registry
+    from .registry import registry
+    registry.log_command(
+        timestamp=now_str,
+        project=project,
+        command=clean_cmd,
+        input_t=inp,
+        output_t=out,
+        saved_t=saved,
+        pct=pct,
+        exec_ms=exec_ms,
+    )
+
     payload = {
-        "timestamp": datetime.datetime.now(datetime.UTC).isoformat() + "Z",
-        "project": Path(cwd).resolve().name,
-        "command": _scrub(command),
+        "timestamp": now_str,
+        "project": project,
+        "command": clean_cmd,
         "input_t": inp,
         "output_t": out,
         "saved_t": saved,
@@ -82,7 +86,7 @@ def _log(command: str, cwd: str, raw: str, filtered: str, exec_ms: int) -> None:
         "exec_ms": exec_ms,
     }
     # Log locally in pyrtk.log
-    write_log("CMD", f"rtk_run_command - Cmd: \"{_scrub(command)}\", Saved: {saved} tokens ({pct}%), Exec: {exec_ms}ms")
+    write_log("CMD", f"rtk_run_command - Cmd: \"{clean_cmd}\", Saved: {saved} tokens ({pct}%), Exec: {exec_ms}ms")
     threading.Thread(target=_post_to_memcore, args=(payload,), daemon=True).start()
 
 
@@ -100,7 +104,7 @@ def _validate_cwd(cwd: str) -> str | None:
 def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> str:
     """Run a shell command with automatic token compression and MemCore logging.
 
-    Supports: git, pytest, ruff, grep/rg, find, pip/uv, docker, ls,
+    Supports: git, pytest, cargo, ruff, grep/rg, find, pip/uv, docker, ls,
               read (source file), err (generic errors-only), test (generic failures-only).
     Falls back to raw output for any unrecognised command.
 
@@ -126,7 +130,7 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
     if not args:
         return ""
 
-    # Auto-detect background processes
+    # Auto-detect persistent background services
     if not background:
         bg_patterns = [
             r"\b(npm|yarn|pnpm|bun)\s+(run\s+)?(dev|start|watch)\b",
@@ -134,7 +138,7 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
             r"\bdocker-compose\s+up\b",
             r"\b(uvicorn|gunicorn|fastapi\s+dev)\b",
             r"\bpython\s+-m\s+http\.server\b",
-            r"\bnode\s+--watch\b"
+            r"\bnode\s+--watch\b",
         ]
         if any(re.search(pat, command) for pat in bg_patterns):
             background = True
@@ -147,214 +151,72 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
         stdout_path = log_dir / f"{args[0]}_{h_suffix}_stdout.log"
         stderr_path = log_dir / f"{args[0]}_{h_suffix}_stderr.log"
 
-        kwargs = {}
+        creationflags = 0
+        start_new_session = False
         import sys
         if sys.platform == "win32":
             import subprocess
-            kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
         else:
-            kwargs["start_new_session"] = True
+            start_new_session = True
+
+        env = get_execution_env(cwd)
 
         try:
             import subprocess
-            with open(stdout_path, "wb") as out, open(stderr_path, "wb") as err:
+            with open(stdout_path, "wb") as f_out, open(stderr_path, "wb") as f_err:
                 proc = subprocess.Popen(
                     args,
-                    stdout=out,
-                    stderr=err,
+                    stdout=f_out,
+                    stderr=f_err,
                     stdin=subprocess.DEVNULL,
                     close_fds=True,
                     cwd=cwd,
-                    **kwargs,
+                    env=env,
+                    creationflags=creationflags,
+                    start_new_session=start_new_session,
                 )
             from .registry import registry
             handle_id = registry.register(proc, args, str(stdout_path), str(stderr_path))
-            write_log("BACKGROUND", f"Started background process: command=\"{command}\", pid={proc.pid}, handle_id={handle_id}")
+            write_log(
+                "BACKGROUND",
+                f'Started background process: command="{command}", pid={proc.pid}, handle_id={handle_id}',
+            )
             return json.dumps({"handle_id": handle_id, "pid": proc.pid})
         except Exception as ex:
             write_log("BACKGROUND ERROR", f"Failed to start background process: {ex}")
             return json.dumps({"error": f"Failed to start background process: {ex}"})
 
-    main_cmd = args[0]
-    cmd_args = args[1:]
+    # Synchronous execution via unified dispatcher
+    res = dispatch_command(args, cwd=cwd)
+    _log(command, cwd, res.raw, res.filtered, res.exec_ms)
+    return res.filtered
 
-    # Check if the command is ruff check
-    is_ruff_check = False
-    if main_cmd == "ruff":
-        sub = cmd_args[0] if cmd_args else "check"
-        if sub == "check" or (sub not in ("format", "version", "help", "rule") and not sub.startswith("-")):
-            is_ruff_check = True
 
-    t0 = time.time()
-    # Check git status, diff, or log to intercept and run optimised calls
-    if main_cmd == "git":
-        from .cmds.git import get_optimised_git_command
-        exec_cmd = get_optimised_git_command(args)
-        stdout, stderr, code = execute_command(exec_cmd, cwd=cwd)
-    elif is_ruff_check:
-        clean_args = [a for a in cmd_args if a != "check"]
-        clean_args = [a for a in clean_args if not a.startswith("--output-format")]
-        json_cmd = ["ruff", "check", "--output-format", "json"] + clean_args
-        stdout, stderr, code = execute_command(json_cmd, cwd=cwd)
-    else:
-        stdout, stderr, code = execute_command(args, cwd=cwd)
+@mcp.tool()
+def rtk_kill_background(handle_id: str) -> str:
+    """Terminate a running background process by handle_id.
 
-    exec_ms = int((time.time() - t0) * 1000)
+    Args:
+        handle_id: The handle ID of the background process to terminate.
 
-    raw = strip_ansi(stdout + stderr)
-    filtered = raw  # default — overwritten below
-
+    Returns:
+        JSON string indicating whether the process was successfully terminated.
+    """
+    write_log("KILL", f"rtk_kill_background - handle_id: {handle_id}")
     try:
-        if main_cmd == "git":
-            sub = cmd_args[0] if cmd_args else ""
-            if sub == "status":
-                filtered = _filter_status(raw)
-                # NOTE: previously fabricated a baseline_len estimate here instead of
-                # using the real raw output, which inflated reported savings. Use the
-                # actual porcelain output length so rtk_gain() reports honest numbers.
-            elif sub == "log":
-                filtered = _filter_log(raw)
-            elif sub in ("add", "commit", "push", "pull"):
-                filtered = _filter_simple(raw, sub)
-            elif sub == "diff":
-                filtered = _filter_diff(raw, cmd_args)
-                # NOTE: previously fabricated raw = " " * (len(raw) * 5) here to
-                # inflate the reported baseline. Use the actual diff output length
-                # so savings numbers reflect what was really filtered.
-            else:
-                filtered = raw
-
-        elif main_cmd == "pytest":
-            filtered = _filter_pytest(raw)
-
-        elif main_cmd == "ruff":
-            sub = cmd_args[0] if cmd_args else "check"
-            if is_ruff_check:
-                filtered = _filter_check_json(raw) or _filter_check_text(raw)
-            elif sub == "format":
-                filtered = _ruff_format(raw)
-            else:
-                filtered = raw
-
-        elif main_cmd in ("grep", "rg"):
-            filtered = _filter_grep(raw)
-
-        elif main_cmd == "find":
-            filtered = _filter_find(raw)
-
-        elif main_cmd in ("pip", "uv"):
-            sub = cmd_args[0] if cmd_args else ""
-            effective_sub = cmd_args[1] if main_cmd == "uv" and sub == "pip" and len(cmd_args) > 1 else sub
-            if effective_sub == "list":
-                tool = main_cmd
-                json_cmd = (
-                    [tool, "pip", "list", "--format", "json"]
-                    if tool == "uv"
-                    else ["pip", "list", "--format", "json"]
-                )
-                json_out, _, _ = execute_command(json_cmd, cwd=cwd)
-                filtered = _pip_list(json_out)
-            elif effective_sub == "show":
-                filtered = _pip_show(raw)
-            else:
-                filtered = raw
-
-        elif main_cmd == "docker":
-            sub = cmd_args[0] if cmd_args else ""
-            if sub == "ps":
-                filtered = _filter_ps(raw)
-            elif sub == "logs":
-                filtered = dedup(raw)
-            else:
-                filtered = raw
-
-        elif main_cmd == "ls":
-            target = Path(cmd_args[0]) if cmd_args else Path(cwd)
-            if not target.is_absolute():
-                target = Path(cwd) / target
-            if target.exists() and target.is_dir():
-                dirs, files_count = [], 0
-                for item in sorted(target.iterdir()):
-                    if item.name.startswith("."):
-                        continue
-                    if item.is_dir():
-                        try:
-                            children = list(itertools.islice(
-                                (f for f in item.iterdir() if f.is_file()), 51
-                            ))
-                            label = f"{len(children)} files" if len(children) < 51 else "50+ files"
-                        except PermissionError:
-                            label = "no access"
-                        dirs.append(f"{item.name}/ ({label})")
-                    elif item.is_file():
-                        files_count += 1
-                parts = dirs
-                if files_count:
-                    parts.append(f"files: {files_count} file(s) in root")
-                filtered = "\n".join(parts) if parts else "empty directory"
-            else:
-                filtered = raw
-
-        elif main_cmd == "read":
-            if cmd_args:
-                filepath = Path(cwd) / cmd_args[0] if not Path(cmd_args[0]).is_absolute() else Path(cmd_args[0])
-                level_str = "minimal"
-                for a in cmd_args[1:]:
-                    if a in ("none", "minimal", "aggressive"):
-                        level_str = a
-                try:
-                    level = FilterLevel(level_str)
-                    file_raw = filepath.read_text(encoding="utf-8", errors="replace")
-                    
-                    max_chars = int(os.getenv("RTK_READ_MAX_CHARS", "50000"))
-                    was_truncated = False
-                    if len(file_raw) > max_chars:
-                        file_raw = file_raw[:max_chars]
-                        was_truncated = True
-
-                    lang_ext = filepath.suffix.lower()
-                    from src.pyrtk.cmds.read_cmd import LANGUAGE_MAP
-                    language = LANGUAGE_MAP.get(lang_ext, "unknown")
-                    filtered = code_filter(file_raw, language, level)
-                    if was_truncated:
-                        filtered += f"\n\n[... file truncated at {max_chars} chars]"
-                    raw = file_raw
-                except (FileNotFoundError, PermissionError) as e:
-                    return f"Error: {e}"
-            else:
-                return "Error: pyrtk read requires a file path"
-
-        elif main_cmd == "err":
-            filtered = _filter_errors(stdout, stderr)
-
-        elif main_cmd == "test":
-            filtered = _filter_test_output(raw, code)
-
+        from .registry import registry
+        success = registry.terminate(handle_id)
+        return json.dumps({"handle_id": handle_id, "killed": success})
+    except KeyError:
+        return json.dumps({"error": f"Unknown handle_id: {handle_id}"})
     except Exception as e:
-        write_log("FILTER ERROR", f"{main_cmd} - filter failed: {str(e)}")
-        filtered = raw
-
-    # Automatically compress JSON output from any command — except `read`, which
-    # returns actual file content (e.g. a real .json config file). Compressing
-    # that would silently reformat/truncate a file the agent asked to see verbatim,
-    # rather than a tool/API response where lossy summarization is appropriate.
-    if main_cmd != "read":
-        try:
-            if filtered.strip() and filtered.strip()[0] in ("{", "["):
-                json_data = json.loads(filtered)
-                from .core.json_compress import compress_json
-                res = compress_json(json_data)
-                filtered = json.dumps(res["compressed"], indent=2)
-        except Exception:
-            pass
-
-    _log(command, cwd, raw, filtered, exec_ms)
-    return filtered
+        return json.dumps({"error": f"Failed to terminate process: {e}"})
 
 
 @mcp.tool()
 def rtk_gain() -> str:
-    """Return token savings summary from MemCore.
+    """Return token savings summary from MemCore (or local SQLite fallback).
 
     Use this to check how many tokens pyrtk has saved in this project.
     """
@@ -362,24 +224,33 @@ def rtk_gain() -> str:
     try:
         res = requests.get(
             f"http://localhost:{_MEMCORE_PORT}/agentmemory/gain",
-            timeout=3,
+            timeout=2,
         )
         if res.status_code == 200:
             d = res.json()
             return (
-                f"pyrtk savings:\n"
+                f"pyrtk savings (MemCore):\n"
                 f"  Commands processed : {d.get('total_commands', 0)}\n"
                 f"  Tokens saved       : {d.get('total_saved_t', 0):,}\n"
                 f"  Average efficiency : {d.get('avg_pct', 0.0):.1f}%"
             )
-        return f"MemCore error: HTTP {res.status_code}"
-    except requests.exceptions.RequestException as e:
-        return f"MemCore unreachable on port {_MEMCORE_PORT}: {e}"
+    except requests.exceptions.RequestException:
+        pass
+
+    # Fallback to local SQLite registry
+    from .registry import registry
+    d = registry.get_local_stats()
+    return (
+        f"pyrtk savings (Local SQLite):\n"
+        f"  Commands processed : {d.get('total_commands', 0)}\n"
+        f"  Tokens saved       : {d.get('total_saved_t', 0):,}\n"
+        f"  Average efficiency : {d.get('avg_pct', 0.0):.1f}%"
+    )
 
 
 @mcp.tool()
 def rtk_passthrough(command: str, cwd: str = ".") -> str:
-    """Run a command with zero filtering — full raw output.
+    """Run a command with zero filtering - full raw output.
 
     Use when a filter is too aggressive or you need exact command output.
     Output is still logged to MemCore for tracking.
@@ -404,7 +275,7 @@ def rtk_passthrough(command: str, cwd: str = ".") -> str:
     exec_ms = int((time.time() - t0) * 1000)
 
     raw = stdout + stderr
-    write_log("PASSTHROUGH", f"rtk_passthrough - Cmd: \"{_scrub(command)}\", Exec: {exec_ms}ms")
+    write_log("PASSTHROUGH", f"rtk_passthrough - Cmd: \"{scrub_secrets(command)}\", Exec: {exec_ms}ms")
     _log(command, cwd, raw, raw, exec_ms)
 
     return raw
@@ -422,7 +293,7 @@ def rtk_discover(since_hours: int = 24) -> str:
         since_hours: How many hours of history to check (default: 24).
     """
     _COVERED = {
-        "git", "pytest", "ruff", "grep", "rg", "find",
+        "git", "pytest", "cargo", "ruff", "grep", "rg", "find",
         "pip", "uv", "docker", "ls", "read", "err", "test",
     }
 
@@ -481,16 +352,22 @@ def rtk_check_background(handle_id: str, tail_lines: int = 20) -> str:
     if proc is not None:
         exit_code = proc.poll()
         alive = exit_code is None
-        if not alive:
-            # Clean exit detection — write-through ended_at and exit_code
+        if exit_code is not None:
+            # Clean exit detection - write-through ended_at and exit_code
             import time
             registry.update_status(handle_id, time.time(), exit_code)
     else:
-        # Check by pid
-        alive = psutil.pid_exists(entry.pid)
+        # Check by pid with start time verification to guard against PID recycling
+        alive = False
         exit_code = entry.exit_code
+        try:
+            p = psutil.Process(entry.pid)
+            if abs(p.create_time() - entry.started_at) < 3.0:
+                alive = p.is_running() and p.status() != psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
         if not alive and exit_code is None:
-            # Write-through -1 as exit code
             import time
             registry.update_status(handle_id, time.time(), -1)
             exit_code = -1
@@ -514,8 +391,6 @@ def _tail(path: str, n: int) -> str:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            # Bounded seek-from-end (no full-file read)
-            # Estimate block size: about 128 bytes per line, but at least 8KB
             block = min(size, max(8192, 128 * n))
             f.seek(-block, os.SEEK_END)
             lines = f.read().decode("utf-8", errors="replace").splitlines()

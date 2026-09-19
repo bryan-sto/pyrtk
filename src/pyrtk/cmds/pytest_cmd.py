@@ -58,8 +58,24 @@ def _filter_pytest(raw: str) -> str:
             failures.append(line)
 
     if not failures:
+        # Check for compact failure lines (e.g. from --tb=short, --tb=line, or -q)
+        compact_failures = [
+            line_item for line_item in lines
+            if (
+                line_item.startswith("FAILED ")
+                or "AssertionError" in line_item
+                or ("error" in line_item.lower() and not line_item.startswith("=="))
+            )
+        ]
+        if compact_failures:
+            summary = [line_item for line_item in lines if re.search(r'\d+ (passed|failed|error|warning)', line_item)]
+            res = compact_failures[:20]
+            if summary and summary[-1] not in res:
+                res.append(summary[-1])
+            return "\n".join(res)
+
         # Check if there is a summary line at least
-        summary = [l for l in lines if re.search(r'\d+ (passed|failed|error|warning)', l)]
+        summary = [line_item for line_item in lines if re.search(r'\d+ (passed|failed|error|warning)', line_item)]
         if summary:
             return summary[-1]
         if "no tests ran" in raw.lower() or "collected 0 items" in raw.lower():

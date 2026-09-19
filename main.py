@@ -95,6 +95,15 @@ def test(ctx: typer.Context, verbose: bool = typer.Option(False, "-v")) -> None:
     cmds.test_cmd.run(ctx.args, verbose)
 
 
+@app.command(context_settings=_CTX)
+def cargo(ctx: typer.Context, verbose: bool = typer.Option(False, "-v")) -> None:
+    """Proxy cargo — compact test, clippy, build output.
+
+    Example: pyrtk cargo test
+    """
+    cmds.cargo_cmd.run(ctx.args, verbose)
+
+
 # ── Utility commands ───────────────────────────────────────────────────────────
 
 @app.command()

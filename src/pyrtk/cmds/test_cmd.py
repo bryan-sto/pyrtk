@@ -78,7 +78,7 @@ def _filter_test_output(raw: str, exit_code: int) -> str:
     # Detect collection errors before anything else
     if _COLLECTION_ERROR_RE.search(raw):
         # Return the relevant section — don't say "all passed"
-        relevant = [l for l in lines if l.strip() and not l.strip().startswith("=")]
+        relevant = [item for item in lines if item.strip() and not item.strip().startswith("=")]
         return "\n".join(relevant[:20]) or f"Collection error (exit {exit_code})"
 
     # Extract summary lines

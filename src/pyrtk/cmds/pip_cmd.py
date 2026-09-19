@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import json
-import sys
 import shutil
+import sys
 import time
 
 from ..core.utils import execute_command
@@ -14,7 +14,7 @@ _SHOW_KEEP = {"Name", "Version", "Summary", "Requires", "Required-by", "Location
 
 
 def run(args: list[str], verbose: bool = False) -> None:
-    """Proxy pip/uv pip — compact JSON list, trimmed show output.
+    """Proxy pip/uv pip - compact JSON list, trimmed show output.
 
     Prefers uv when available. Handles list and show subcommands.
     """
@@ -29,7 +29,7 @@ def run(args: list[str], verbose: bool = False) -> None:
         stdout, stderr, code = execute_command(cmd)
         exec_ms = int((time.time() - t0) * 1000)
         raw = stdout + stderr
-        filtered = _filter_list(raw)
+        filtered = _filter_list(stdout) if stdout.strip() else _filter_list(raw)
 
     elif sub == "show":
         cmd = ([tool, "pip", "show"] + args[1:]
@@ -39,7 +39,7 @@ def run(args: list[str], verbose: bool = False) -> None:
         stdout, stderr, code = execute_command(cmd)
         exec_ms = int((time.time() - t0) * 1000)
         raw = stdout + stderr
-        filtered = _filter_show(raw)
+        filtered = _filter_show(stdout) if stdout.strip() else _filter_show(raw)
 
     else:
         cmd = ([tool, "pip"] + args if tool == "uv" else ["pip"] + args)

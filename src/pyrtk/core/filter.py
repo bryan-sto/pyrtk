@@ -111,15 +111,22 @@ def _minimal_filter(content: str, language: str) -> str:
 
     result = []
     in_triple_quote = False
+    in_backtick = False
     for line in content.splitlines():
         stripped = line.strip()
-        
+
         # Avoid stripping comments inside Python multi-line triple-quoted strings
         if language == "python" and stripped:
             if stripped.count('"""') % 2 == 1 or stripped.count("'''") % 2 == 1:
                 in_triple_quote = not in_triple_quote
 
-        if not in_triple_quote and stripped.startswith(line_prefix):
+        # Avoid stripping comments inside JS/TS/Go backtick multi-line strings / template literals
+        if language in ("javascript", "typescript", "go") and stripped:
+            backtick_count = len(re.findall(r'(?<!\\)`', stripped))
+            if backtick_count % 2 == 1:
+                in_backtick = not in_backtick
+
+        if not in_triple_quote and not in_backtick and stripped.startswith(line_prefix):
             continue
         result.append(line)
 
@@ -165,9 +172,18 @@ def _aggressive_python(content: str) -> str:
         )
 
         if is_keep:
-            result.append(line)
-
             if is_sig:
+                sig_indent = indent
+                # Collect all lines that make up the signature (for multi-line signatures)
+                while i < len(lines):
+                    sig_line = lines[i]
+                    result.append(sig_line)
+                    stripped_sig = sig_line.strip()
+                    cleaned = re.sub(r"#.*$", "", stripped_sig).rstrip()
+                    if cleaned.endswith(":"):
+                        break
+                    i += 1
+
                 # Look ahead for docstring
                 j = i + 1
                 while j < len(lines) and not lines[j].strip():
@@ -180,20 +196,21 @@ def _aggressive_python(content: str) -> str:
                         while j < len(lines):
                             result.append(lines[j])
                             if quote in lines[j].strip():
-                                    j += 1
-                                    break
+                                j += 1
+                                break
                             j += 1
                     else:
                         j += 1
-                    i = j
+                    i = j - 1
 
                 # Add ellipsis body placeholder and start skipping
-                sig_indent = indent
                 body_indent = " " * (sig_indent + 4)
                 result.append(f"{body_indent}...")
                 skip_until_indent = sig_indent
                 i += 1
                 continue
+            else:
+                result.append(line)
 
         elif indent == 0 and stripped and "=" in stripped:
             # Keep module-level assignments (constants, __all__, etc.)
@@ -221,6 +238,7 @@ def _aggressive_brace(content: str) -> str:
     result: list[str] = []
     brace_depth = 0
     body_start_depth: int | None = None
+    pending_sig = False
 
     for line in lines:
         stripped = line.strip()
@@ -231,9 +249,16 @@ def _aggressive_brace(content: str) -> str:
 
         if body_start_depth is None:
             result.append(line)
-            if (is_sig or is_structural) and open_b > close_b:
+            should_open_body = (is_sig or is_structural or pending_sig) and open_b > close_b
+            if should_open_body:
                 body_start_depth = brace_depth
                 result.append("  ...")
+                pending_sig = False
+            elif is_sig and open_b == 0:
+                pending_sig = True
+            elif stripped and not is_sig and not is_structural and open_b == 0:
+                pending_sig = False
+
             brace_depth += open_b - close_b
         else:
             brace_depth += open_b - close_b

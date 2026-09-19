@@ -4,15 +4,15 @@ from __future__ import annotations
 import sys
 import time
 
-from ..core.utils import execute_command, strip_ansi
 from ..core.filter import dedup
+from ..core.utils import execute_command, strip_ansi
 from ..tracker import track
 
 
 def run(args: list[str], verbose: bool = False) -> None:
     sub = args[0] if args else ""
     if sub == "ps":
-        cmd = ["docker", "ps", "--format", "table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}"]
+        cmd = ["docker", "ps", "--format", "table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}"] + args[1:]
     else:
         cmd = ["docker"] + args
 
@@ -41,12 +41,27 @@ def run(args: list[str], verbose: bool = False) -> None:
 
 
 def _filter_ps(raw: str) -> str:
-    lines = raw.splitlines()
+    import re
+    lines = [line for line in raw.splitlines() if line.strip()]
     if len(lines) <= 1:
         return "no containers running"
     result = ["CONTAINER ID | IMAGE | STATUS | NAMES"]
     for line in lines[1:]:
-        parts = line.strip().split('\t')
-        if len(parts) >= 4:
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        if "\t" in line_clean:
+            parts = [p.strip() for p in line_clean.split("\t") if p.strip()]
+        else:
+            parts = [p.strip() for p in re.split(r"\s{2,}", line_clean) if p.strip()]
+        if len(parts) >= 6:
+            # 7-column standard format: ID (0), IMAGE (1), STATUS (-3), NAMES (-1)
+            result.append(f"{parts[0]} | {parts[1]} | {parts[-3]} | {parts[-1]}")
+        elif len(parts) >= 4:
+            # 4-column custom table format: ID, IMAGE, STATUS, NAMES
             result.append(f"{parts[0]} | {parts[1]} | {parts[2]} | {parts[3]}")
+        elif len(parts) >= 2:
+            result.append(" | ".join(parts))
+        else:
+            result.append(line_clean)
     return "\n".join(result)

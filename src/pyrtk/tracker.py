@@ -4,25 +4,15 @@ from __future__ import annotations
 import datetime
 import logging
 import os
-import re
 import threading
 from pathlib import Path
 
 import requests
 
-from .core.utils import estimate_tokens
+from .core.utils import estimate_tokens, scrub_secrets
+from .registry import registry
 
 logger = logging.getLogger(__name__)
-
-_SECRET_RE = re.compile(
-    r"(bearer|authorization|token|password|secret|key|auth)(?:\s+|=)\S+",
-    re.IGNORECASE,
-)
-
-
-def _scrub(cmd: str) -> str:
-    """Remove sensitive credential patterns from command string."""
-    return _SECRET_RE.sub(r"\1 [REDACTED]", cmd)
 
 
 def _post_to_memcore(payload: dict, port: str) -> None:
@@ -42,18 +32,32 @@ def track(
     exec_ms: int,
     cwd: str = ".",
 ) -> None:
-    """Async tracking function. Logs metadata to local MemCore."""
+    """Async tracking function. Logs metadata to local SQLite and MemCore."""
     inp = estimate_tokens(raw)
     out = estimate_tokens(filtered)
     saved = max(0, inp - out)
     pct = round((saved / inp * 100) if inp > 0 else 0.0, 1)
 
     project = Path(cwd).resolve().name
+    now_str = datetime.datetime.now(datetime.UTC).isoformat() + "Z"
+    clean_cmd = scrub_secrets(original_cmd)
+
+    # Persist locally in SQLite registry first (guaranteed offline telemetry)
+    registry.log_command(
+        timestamp=now_str,
+        project=project,
+        command=clean_cmd,
+        input_t=inp,
+        output_t=out,
+        saved_t=saved,
+        pct=pct,
+        exec_ms=exec_ms,
+    )
 
     payload = {
-        "timestamp": datetime.datetime.now(datetime.UTC).isoformat() + "Z",
+        "timestamp": now_str,
         "project": project,
-        "command": _scrub(original_cmd),
+        "command": clean_cmd,
         "input_t": inp,
         "output_t": out,
         "saved_t": saved,
@@ -76,24 +80,30 @@ def report() -> None:
 
     port = os.getenv("MEMCORE_PORT", "3111")
     url = f"http://localhost:{port}/agentmemory/gain"
+    data = None
+    source = "MemCore"
 
     try:
-        res = requests.get(url, timeout=3)
+        res = requests.get(url, timeout=2)
         if res.status_code == 200:
             data = res.json()
-            console = Console()
-            table = Table(title="pyrtk Token Savings (MemCore Integrated)")
-            table.add_column("Metric", style="cyan")
-            table.add_column("Value", style="magenta")
+    except requests.exceptions.RequestException:
+        pass
 
-            table.add_row("Commands Processed", str(data.get("total_commands", 0)))
-            table.add_row("Total Input Tokens", f"{data.get('total_input_t', 0):,}")
-            table.add_row("Total Output Tokens", f"{data.get('total_output_t', 0):,}")
-            table.add_row("Total Tokens Saved", f"{data.get('total_saved_t', 0):,}")
-            table.add_row("Average Efficiency", f"{data.get('avg_pct', 0.0):.1f}%")
+    if not data:
+        # Fallback to local SQLite command history
+        data = registry.get_local_stats()
+        source = "Local SQLite"
 
-            console.print(table)
-        else:
-            print(f"Error: MemCore returned status code {res.status_code}")
-    except requests.exceptions.RequestException as e:
-        print(f"Error connecting to MemCore server on port {port}: {str(e)}")
+    console = Console()
+    table = Table(title=f"pyrtk Token Savings ({source})")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="magenta")
+
+    table.add_row("Commands Processed", str(data.get("total_commands", 0)))
+    table.add_row("Total Input Tokens", f"{data.get('total_input_t', 0):,}")
+    table.add_row("Total Output Tokens", f"{data.get('total_output_t', 0):,}")
+    table.add_row("Total Tokens Saved", f"{data.get('total_saved_t', 0):,}")
+    table.add_row("Average Efficiency", f"{data.get('avg_pct', 0.0):.1f}%")
+
+    console.print(table)

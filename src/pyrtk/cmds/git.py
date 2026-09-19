@@ -18,7 +18,7 @@ def get_optimised_git_command(args: list[str]) -> list[str]:
 
     sub = args[1]
     if sub == "status":
-        return ["git", "status", "--porcelain"]
+        return ["git", "status", "--porcelain"] + args[2:]
     elif sub == "diff":
         has_stat_option = any(arg in args for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
         if not has_stat_option:
@@ -83,16 +83,23 @@ def _filter_status(raw: str) -> str:
 
     parts = []
     if modified:
-        parts.append(f"modified: {', '.join(modified)}")
+        if len(modified) <= 15:
+            parts.append(f"modified: {', '.join(modified)}")
+        else:
+            parts.append(f"modified: {', '.join(modified[:15])} ... (+{len(modified) - 15} more files)")
     if untracked_count:
         parts.append(f"untracked: {untracked_count} file(s)")
     return "\n".join(parts) if parts else "clean"
 
 
 def _filter_log(raw: str) -> str:
-    # NOTE: Match only short hashes (e.g. from git log --oneline), ignoring verbose commit header lines.
-    lines = [l for l in raw.splitlines() if re.match(r'^[0-9a-f]{7,}\s', l)]
-    return "\n".join(lines[:10]) if lines else raw[:200]
+    # Match short hashes (e.g. from git log --oneline), ignoring verbose commit header lines.
+    lines = [line for line in raw.splitlines() if re.match(r'^[0-9a-f]{7,}\s', line)]
+    if not lines:
+        return raw[:200] if raw.strip() else "clean (no commits)"
+    if len(lines) <= 15:
+        return "\n".join(lines)
+    return "\n".join(lines[:15]) + f"\n... +{len(lines) - 15} more commits"
 
 
 def _filter_diff(raw: str, args: list[str]) -> str:
@@ -102,11 +109,20 @@ def _filter_diff(raw: str, args: list[str]) -> str:
             return raw[:400]
         return raw
 
-    lines = raw.splitlines()
-    stats = [l for l in lines if re.match(r'^\s*\d+\s+files? changed', l)]
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return "clean (no changes)"
+    stats = [line for line in lines if re.match(r'^\s*\d+\s+files? changed', line)]
+    file_lines = [line for line in lines if "|" in line and not re.match(r'^\s*\d+\s+files? changed', line)]
     if stats:
-        return stats[0]
-    return raw[:400]
+        res = []
+        for fl in file_lines[:15]:
+            res.append(fl)
+        if len(file_lines) > 15:
+            res.append(f"  ... +{len(file_lines) - 15} more files")
+        res.append(stats[0])
+        return "\n".join(res)
+    return "\n".join(lines[:15])
 
 
 def _filter_simple(raw: str, sub: str) -> str:

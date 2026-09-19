@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 import shutil
+import sys
 import time
 from collections import defaultdict
 
@@ -14,12 +14,12 @@ from ..tracker import track
 _MAX_FILES = int(os.getenv("RTK_GREP_MAX_FILES", "15"))
 _PREVIEW_LEN = int(os.getenv("RTK_GREP_PREVIEW_LEN", "80"))
 
-# grep -n / rg format: filename:lineno:content
-_GREP_LINE_RE = re.compile(r"^(.+?):(\d+):(.*)$")
+# grep -n / rg format: filename:lineno:content (supports Windows paths and optional lineno)
+_GREP_LINE_RE = re.compile(r"^((?:[a-zA-Z]:)?[^:\r\n]+):(?:(\d+):)?(.*)$")
 
 
 def run(args: list[str], verbose: bool = False) -> None:
-    """Proxy grep/rg — group matches by file with counts and one preview per file.
+    """Proxy grep/rg - group matches by file with counts and one preview per file.
 
     Auto-selects rg over grep when available.
     Exit code 1 (no matches) is not treated as an error.
@@ -41,7 +41,7 @@ def run(args: list[str], verbose: bool = False) -> None:
     print(filtered)
     track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms)
 
-    # Exit 1 from grep/rg means "no matches" — not a failure worth propagating
+    # Exit 1 from grep/rg means "no matches" - not a failure worth propagating
     if code not in (0, 1):
         raise SystemExit(code)
 
@@ -57,7 +57,12 @@ def _filter_grep(raw: str) -> str:
     for line in raw.splitlines():
         m = _GREP_LINE_RE.match(line)
         if m:
-            filename, _, content = m.groups()
+            filename = m.group(1)
+            lineno = m.group(2)
+            content = m.group(3)
+            if lineno is None and not ("." in filename or "/" in filename or "\\" in filename):
+                unmatched.append(line)
+                continue
             by_file[filename].append(content.strip()[:_PREVIEW_LEN])
         else:
             unmatched.append(line)
@@ -77,7 +82,7 @@ def _filter_grep(raw: str) -> str:
 
     for filename, matches in sorted(by_file.items(), key=lambda x: -len(x[1]))[:_MAX_FILES]:
         preview = matches[0] if matches else ""
-        result.append(f"  {filename}: {len(matches)} — {preview}")
+        result.append(f"  {filename}: {len(matches)} - {preview}")
 
     if len(by_file) > _MAX_FILES:
         result.append(f"  ... +{len(by_file) - _MAX_FILES} more file(s)")
