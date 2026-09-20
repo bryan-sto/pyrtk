@@ -19,10 +19,17 @@ from .core.utils import estimate_tokens, execute_command, get_execution_env, scr
 
 # Custom logging matching memcore.log style with automatic rotation
 def write_log(tag: str, msg: str) -> None:
-    """Write log messages to pyrtk.log in project root matching MemCore format with rotation."""
+    """Write log messages to pyrtk.log matching MemCore format with rotation."""
     try:
         now_str = datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        log_path = Path(__file__).parent.parent.parent / "pyrtk.log"
+        local_log = Path(__file__).parent.parent.parent / "pyrtk.log"
+        if local_log.exists():
+            log_path = local_log
+        else:
+            log_dir = Path.home() / ".pyrtk"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / "pyrtk.log"
+
         if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
             rot_path = log_path.with_suffix(".log.1")
             if rot_path.exists():
@@ -417,6 +424,10 @@ def rtk_retrieve(ref: str) -> str:
         return json.dumps({"error": str(e)})
 
 
-if __name__ == "__main__":
+def main() -> None:
     write_log("pyrtk", "MCP server initialized successfully")
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

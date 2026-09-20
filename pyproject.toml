@@ -13,8 +13,9 @@ dependencies = [
 ]
 
 [project.scripts]
-pyrtk = "main:app"
-rtk-mcp = "mcp_server:mcp.run"
+pyrtk = "pyrtk.cli:app"
+pyrtk-mcp = "pyrtk.mcp_server:main"
+rtk-mcp = "pyrtk.mcp_server:main"
 
 [dependency-groups]
 dev = [
@@ -24,7 +25,7 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [tool.ruff]
