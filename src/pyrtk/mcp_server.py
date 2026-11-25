@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import threading
 import time
 from pathlib import Path
@@ -13,7 +12,14 @@ import requests
 from mcp.server.fastmcp import FastMCP
 
 from .core.dispatcher import dispatch_command
-from .core.utils import estimate_tokens, execute_command, get_execution_env, scrub_secrets, utc_now_iso
+from .core.utils import (
+    estimate_tokens,
+    execute_command,
+    get_execution_env,
+    scrub_secrets,
+    split_command,
+    utc_now_iso,
+)
 
 
 # Custom logging matching memcore.log style with automatic rotation
@@ -127,9 +133,7 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
         return err
 
     try:
-        import platform
-        is_windows = platform.system() == "Windows"
-        args = [a.strip('"\'') for a in shlex.split(command, posix=not is_windows)]
+        args = split_command(command)
     except ValueError as e:
         return f"Error: could not parse command: {e}"
 
@@ -270,9 +274,7 @@ def rtk_passthrough(command: str, cwd: str = ".") -> str:
         return err
 
     try:
-        import platform
-        is_windows = platform.system() == "Windows"
-        args = [a.strip('"\'') for a in shlex.split(command, posix=not is_windows)]
+        args = split_command(command)
     except ValueError as e:
         return f"Error: could not parse command: {e}"
 

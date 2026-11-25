@@ -735,3 +735,55 @@ def test_utc_now_iso():
     parsed = datetime.datetime.fromisoformat(ts)
     assert parsed.tzinfo is not None
 
+
+def test_split_command_windows_nested_quotes():
+    from src.pyrtk.core.utils import split_command
+
+    assert split_command('powershell -Command "Write-Host \'hi\'"', is_windows=True) == [
+        "powershell",
+        "-Command",
+        "Write-Host 'hi'",
+    ]
+    assert split_command("echo '\"inner\"'", is_windows=True) == ["echo", '"inner"']
+
+
+def test_split_command_windows_escaped_inner_double_quotes():
+    from src.pyrtk.core.utils import split_command
+
+    assert split_command('python -c "print(\\"hello\\")"', is_windows=True) == [
+        "python",
+        "-c",
+        'print("hello")',
+    ]
+
+
+def test_split_command_windows_backslashes():
+    from src.pyrtk.core.utils import split_command
+
+    assert split_command(r"cat C:\Users\foo\bar.txt", is_windows=True) == [
+        "cat",
+        r"C:\Users\foo\bar.txt",
+    ]
+    assert split_command(r'cat "C:\Users\foo bar\baz.txt"', is_windows=True) == [
+        "cat",
+        r"C:\Users\foo bar\baz.txt",
+    ]
+
+
+def test_split_command_windows_empty_quoted_strings():
+    from src.pyrtk.core.utils import split_command
+
+    assert split_command('cmd "" \'\'', is_windows=True) == ["cmd", "", ""]
+    assert split_command('""', is_windows=True) == [""]
+    assert split_command("", is_windows=True) == []
+
+
+def test_split_command_posix():
+    from src.pyrtk.core.utils import split_command
+
+    assert split_command('echo "hello world" \'foo bar\'', is_windows=False) == [
+        "echo",
+        "hello world",
+        "foo bar",
+    ]
+

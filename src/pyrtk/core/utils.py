@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -130,3 +131,58 @@ def estimate_tokens(text: str) -> int:
 def utc_now_iso() -> str:
     """Return current UTC timestamp in ISO-8601 format with millisecond precision and Z suffix."""
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def split_command(command: str, is_windows: bool | None = None) -> list[str]:
+    """Split a shell command string into argument tokens.
+
+    On POSIX, delegates to ``shlex.split(command, posix=True)``.
+    On Windows, preserves backslashes, peels at most one matching outer quote
+    pair per quoted segment, and unescapes ``\\"`` inside double-quoted tokens
+    without stripping inner quotes.
+    """
+    if is_windows is None:
+        is_windows = sys.platform == "win32"
+
+    if not is_windows:
+        return shlex.split(command, posix=True)
+
+    tokens: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    in_token = False
+    i = 0
+    n = len(command)
+
+    while i < n:
+        ch = command[i]
+        if quote is not None:
+            if quote == '"' and ch == "\\" and i + 1 < n and command[i + 1] == '"':
+                buf.append('"')
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            else:
+                buf.append(ch)
+        else:
+            if ch.isspace():
+                if in_token:
+                    tokens.append("".join(buf))
+                    buf.clear()
+                    in_token = False
+            elif ch in ('"', "'"):
+                quote = ch
+                in_token = True
+            else:
+                buf.append(ch)
+                in_token = True
+        i += 1
+
+    if quote is not None:
+        raise ValueError("No closing quotation")
+
+    if in_token:
+        tokens.append("".join(buf))
+
+    return tokens
