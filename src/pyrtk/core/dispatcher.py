@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from ..cmds.ruff_cmd import _filter_format as _ruff_format
 from ..cmds.test_cmd import _filter_test_output
 from .filter import FilterLevel, code_filter, dedup
 from .json_compress import compress_json
-from .utils import execute_command, strip_ansi
+from .utils import execute_command, scrub_secrets, strip_ansi
 
 
 @dataclass(frozen=True)
@@ -41,9 +42,10 @@ def _write_tee_log(main_cmd: str, raw: str, cwd: str = ".") -> str | None:
     try:
         tee_dir = Path.home() / ".pyrtk" / "tee"
         tee_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{int(time.time())}_{main_cmd}.log"
+        uid = uuid.uuid4().hex[:6]
+        filename = f"{int(time.time())}_{uid}_{main_cmd}.log"
         log_file = tee_dir / filename
-        log_file.write_text(raw, encoding="utf-8", errors="replace")
+        log_file.write_text(scrub_secrets(raw), encoding="utf-8", errors="replace")
         return str(log_file)
     except Exception:
         return None

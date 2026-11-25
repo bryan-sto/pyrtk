@@ -354,5 +354,14 @@ class ProcessRegistry:
         except Exception:
             pass
 
+        tee_dir = Path.home() / ".pyrtk" / "tee"
+        if tee_dir.exists():
+            for log_file in tee_dir.glob("*.log"):
+                try:
+                    if log_file.stat().st_mtime < cutoff:
+                        log_file.unlink()
+                except Exception:
+                    pass
+
 
 registry = ProcessRegistry()

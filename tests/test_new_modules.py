@@ -870,3 +870,74 @@ def test_rtk_run_bg_patterns_scoped_to_head(tmp_path, monkeypatch):
     assert calls["dispatch"] == 1
     assert calls["popen"] == 1
 
+
+def test_scrub_secrets_tightened_no_false_positives():
+    from src.pyrtk.core.utils import scrub_secrets
+
+    # Normal English phrases should NOT be redacted
+    msg = 'git commit -m "fix auth middleware"'
+    assert scrub_secrets(msg) == msg
+    assert scrub_secrets("token savings report") == "token savings report"
+
+    # Explicit assignments ARE redacted
+    assert "abc123" not in scrub_secrets("token=abc123")
+    assert "[REDACTED]" in scrub_secrets("token=abc123")
+    assert "xyz" not in scrub_secrets("api_key: xyz")
+    assert "p@ss" not in scrub_secrets('password="p@ss"')
+
+    # CLI flags ARE redacted
+    assert "xyz" not in scrub_secrets("cli --api-key xyz")
+    assert "[REDACTED]" in scrub_secrets("cli --api-key xyz")
+    assert "abc" not in scrub_secrets("cli --token abc")
+    assert "pw" not in scrub_secrets("cli --password pw")
+    assert "mysecret" not in scrub_secrets("cli --secret mysecret")
+
+
+def test_write_tee_log_scrubs_and_unique(tmp_path, monkeypatch):
+    import re
+    from pathlib import Path
+
+    from src.pyrtk.core.dispatcher import _write_tee_log
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    p1 = _write_tee_log("pytest", "Error with token=supersecret123 and --api-key mykey999")
+    p2 = _write_tee_log("pytest", "Second failure")
+
+    assert p1 is not None and p2 is not None
+    assert p1 != p2
+
+    path1 = Path(p1)
+    assert re.match(r"^\d+_[0-9a-f]{6}_pytest\.log$", path1.name)
+    content = path1.read_text(encoding="utf-8")
+    assert "supersecret123" not in content
+    assert "mykey999" not in content
+    assert "[REDACTED]" in content
+
+
+def test_process_sweep_prunes_old_tee_logs(tmp_path, monkeypatch):
+    import os
+    import time
+    from pathlib import Path
+
+    from src.pyrtk.registry import ProcessRegistry
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    tee_dir = tmp_path / ".pyrtk" / "tee"
+    tee_dir.mkdir(parents=True)
+
+    old_log = tee_dir / "old_test.log"
+    new_log = tee_dir / "new_test.log"
+    old_log.write_text("old", encoding="utf-8")
+    new_log.write_text("new", encoding="utf-8")
+
+    old_mtime = time.time() - 100
+    os.utime(old_log, (old_mtime, old_mtime))
+
+    reg = ProcessRegistry(db_dir=tmp_path / "db")
+    reg.process_sweep(max_age_seconds=50)
+
+    assert not old_log.exists()
+    assert new_log.exists()
+
+

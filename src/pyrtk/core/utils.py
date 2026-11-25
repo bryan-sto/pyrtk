@@ -18,11 +18,20 @@ _SECRET_PATTERNS = [
         re.compile(r"""(?i)\b(?:authorization:\s*)?bearer\s+(['"]?)([^\s'"]+)\1"""),
         r"Bearer [REDACTED]",
     ),
-    # Key-value pairs: token=xyz, password: xyz, "api_key": "xyz"
+    # Explicit key-value assignments: token=xyz, api_key: xyz, password="p@ss"
     (
         re.compile(
             r"""(?i)\b(authorization|token|password|secret|api[_-]?key|auth)"""
-            r"""(?:\s*[:=]\s*|\s+)(['"]?)([^\s'"]+)\2""",
+            r"""['"]?\s*[:=]\s*(['"]?)([^\s'"]+)\2""",
+            re.VERBOSE,
+        ),
+        r"\1 \2[REDACTED]\2",
+    ),
+    # CLI flags: --token abc, --api-key xyz, --password pw, --secret s
+    (
+        re.compile(
+            r"""(?i)(--(?:authorization|token|password|secret|api[_-]?key|auth))"""
+            r"""(?:\s*=\s*|\s+)(['"]?)([^\s'"]+)\2""",
             re.VERBOSE,
         ),
         r"\1 \2[REDACTED]\2",

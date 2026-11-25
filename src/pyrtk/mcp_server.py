@@ -193,9 +193,10 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
                 )
             from .registry import registry
             handle_id = registry.register(proc, args, str(stdout_path), str(stderr_path))
+            clean_cmd = scrub_secrets(command)
             write_log(
                 "BACKGROUND",
-                f'Started background process: command="{command}", pid={proc.pid}, handle_id={handle_id}',
+                f'Started background process: command="{clean_cmd}", pid={proc.pid}, handle_id={handle_id}',
             )
             return json.dumps({"handle_id": handle_id, "pid": proc.pid})
         except Exception as ex:
