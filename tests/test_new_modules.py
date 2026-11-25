@@ -1308,3 +1308,23 @@ def test_mcp_server_log_delegates_to_tracker(tmp_path, monkeypatch):
 
 
 
+
+
+def test_tracker_submits_telemetry_and_flushes(monkeypatch):
+    from src.pyrtk import tracker
+
+    posted = []
+
+    def fake_post(url, json=None, timeout=None):
+        posted.append((url, json, timeout))
+
+    monkeypatch.setattr(tracker.requests, "post", fake_post)
+    monkeypatch.setattr(tracker.registry, "log_command", lambda **kwargs: None)
+
+    payload = tracker.track("git status", "git status", "raw output", "filtered", 12)
+    tracker._flush_telemetry(timeout=1.0)
+
+    assert payload["command"] == "git status"
+    assert len(posted) == 1
+    assert posted[0][0].endswith("/agentmemory/command/log")
+    assert posted[0][1]["command"] == "git status"

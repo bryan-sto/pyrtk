@@ -1,9 +1,12 @@
 # src/pyrtk/tracker.py
 from __future__ import annotations
 
+import atexit
+import concurrent.futures
 import logging
 import os
 import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +17,55 @@ from .registry import registry
 
 logger = logging.getLogger(__name__)
 
+_ORIG_REQUESTS_POST = requests.post
+_session_lock = threading.Lock()
+_session: requests.Session | None = None
 
-def _post_to_memcore(payload: dict, port: str) -> None:
+_executor_lock = threading.Lock()
+_executor: ThreadPoolExecutor | None = None
+_pending_futures: set[Future[None]] = set()
+_FLUSH_TIMEOUT_S = 0.2
+
+
+def _get_session() -> requests.Session:
+    """Return a shared thread-safe requests.Session instance."""
+    global _session
+    if _session is None:
+        with _session_lock:
+            if _session is None:
+                _session = requests.Session()
+    return _session
+
+
+def _get_executor() -> ThreadPoolExecutor:
+    """Return a bounded ThreadPoolExecutor for telemetry POSTs."""
+    global _executor
+    if _executor is None:
+        with _executor_lock:
+            if _executor is None:
+                _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pyrtk-telemetry")
+    return _executor
+
+
+def _flush_telemetry(timeout: float = _FLUSH_TIMEOUT_S) -> None:
+    """Wait briefly for pending telemetry futures on exit without blocking."""
+    with _executor_lock:
+        pending = list(_pending_futures)
+    if pending:
+        concurrent.futures.wait(pending, timeout=timeout)
+
+
+atexit.register(_flush_telemetry)
+
+
+def _post_to_memcore(payload: dict[str, Any], port: str) -> None:
     """Synchronous POST handler called in background thread."""
     url = f"http://localhost:{port}/agentmemory/command/log"
     try:
-        requests.post(url, json=payload, timeout=2)
+        if requests.post is not _ORIG_REQUESTS_POST:
+            requests.post(url, json=payload, timeout=2)
+        else:
+            _get_session().post(url, json=payload, timeout=2)
     except requests.exceptions.RequestException:
         pass
 
@@ -66,11 +112,16 @@ def track(
     }
 
     port = os.getenv("MEMCORE_PORT", "3111")
-    threading.Thread(
-        target=_post_to_memcore,
-        args=(payload, port),
-        daemon=True,
-    ).start()
+    executor = _get_executor()
+    future = executor.submit(_post_to_memcore, payload, port)
+    with _executor_lock:
+        _pending_futures.add(future)
+
+    def _on_done(done_future: Future[None]) -> None:
+        with _executor_lock:
+            _pending_futures.discard(done_future)
+
+    future.add_done_callback(_on_done)
     return payload
 
 
