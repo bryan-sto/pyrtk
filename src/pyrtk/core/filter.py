@@ -1,6 +1,7 @@
 # src/pyrtk/core/filter.py
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -8,7 +9,16 @@ from enum import Enum
 
 _DEDUP_SYMBOL = os.getenv("RTK_DEDUP_SYMBOL", "×")
 _BLANK_LINES_RE = re.compile(r'\n{3,}')
-_C_BLOCK_COMMENT_RE = re.compile(r'/\*.*?\*/', re.DOTALL)
+_C_TOKEN_RE = re.compile(
+    r"""
+      "(?:\\.|[^"\\\n])*"
+    | '(?:\\.|[^'\\\n])*'
+    | `(?:\\.|[^`\\])*`
+    | //[^\n]*
+    | /\*[\s\S]*?\*/
+    """,
+    re.VERBOSE,
+)
 
 
 class FilterLevel(Enum):
@@ -92,6 +102,15 @@ def code_filter(content: str, language: str, level: FilterLevel = FilterLevel.MI
     return content
 
 
+def _strip_c_block_comments(content: str) -> str:
+    """Strip C-style /* ... */ block comments while leaving strings and line comments intact."""
+    def _repl(match: re.Match[str]) -> str:
+        text = match.group(0)
+        return "" if text.startswith("/*") else text
+
+    return _C_TOKEN_RE.sub(_repl, content)
+
+
 def _minimal_filter(content: str, language: str) -> str:
     """Strip comments and collapse 3+ blank lines into one.
 
@@ -103,9 +122,9 @@ def _minimal_filter(content: str, language: str) -> str:
     if not line_prefix:
         return content
 
-    # Strip C-style block comments for C-family languages
+    # Strip C-style block comments for C-family languages without touching string literals
     if language not in ("python", "ruby"):
-        content = _C_BLOCK_COMMENT_RE.sub("", content)
+        content = _strip_c_block_comments(content)
     elif language == "ruby":
         content = re.sub(r"^=begin.*?^=end", "", content, flags=re.MULTILINE | re.DOTALL)
 
@@ -144,8 +163,84 @@ def _aggressive_filter(content: str, language: str) -> str:
     return content  # unsupported — return minimal-filtered
 
 
-def _aggressive_python(content: str) -> str:
-    """Python: keep imports, decorators, class/def signatures + docstrings. Drop bodies."""
+def _is_docstring_stmt(stmt: ast.stmt) -> bool:
+    return (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and isinstance(stmt.value.value, str)
+    )
+
+
+def _slice_header_lines(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    lines: list[str],
+) -> tuple[list[str], str]:
+    """Return (decorator_and_header_lines, body_indent) for a def/class AST node."""
+    out: list[str] = []
+    for dec in node.decorator_list:
+        dec_end = dec.end_lineno or dec.lineno
+        out.extend(lines[dec.lineno - 1 : dec_end])
+
+    first_stmt = node.body[0]
+    if first_stmt.lineno == node.lineno:
+        header_line = lines[node.lineno - 1][: first_stmt.col_offset].rstrip()
+        out.append(header_line)
+        body_indent = " " * (node.col_offset + 4)
+    else:
+        header_lines = lines[node.lineno - 1 : first_stmt.lineno - 1]
+        while header_lines and not header_lines[-1].strip():
+            header_lines.pop()
+        out.extend(header_lines)
+        indent_count = first_stmt.col_offset if first_stmt.col_offset > node.col_offset else node.col_offset + 4
+        body_indent = " " * indent_count
+    return out, body_indent
+
+
+def _format_docstring(stmt: ast.stmt, node_lineno: int, body_indent: str, lines: list[str]) -> list[str]:
+    if stmt.lineno == node_lineno:
+        end_col = stmt.end_col_offset if stmt.end_col_offset is not None else len(lines[stmt.lineno - 1])
+        seg = lines[stmt.lineno - 1][stmt.col_offset : end_col]
+        return [f"{body_indent}{seg}"]
+    end_line = stmt.end_lineno or stmt.lineno
+    return lines[stmt.lineno - 1 : end_line]
+
+
+def _format_func_stub(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: list[str]) -> list[str]:
+    out, body_indent = _slice_header_lines(node, lines)
+    first_stmt = node.body[0]
+    if _is_docstring_stmt(first_stmt):
+        out.extend(_format_docstring(first_stmt, node.lineno, body_indent, lines))
+    out.append(f"{body_indent}...")
+    return out
+
+
+def _format_class_stub(node: ast.ClassDef, lines: list[str]) -> list[str]:
+    out, body_indent = _slice_header_lines(node, lines)
+    body_stmts = node.body
+    if body_stmts and _is_docstring_stmt(body_stmts[0]):
+        out.extend(_format_docstring(body_stmts[0], node.lineno, body_indent, lines))
+        body_stmts = body_stmts[1:]
+
+    kept_member = False
+    for stmt in body_stmts:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.extend(_format_func_stub(stmt, lines))
+            kept_member = True
+        elif isinstance(stmt, ast.ClassDef):
+            out.extend(_format_class_stub(stmt, lines))
+            kept_member = True
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            end_line = stmt.end_lineno or stmt.lineno
+            out.extend(lines[stmt.lineno - 1 : end_line])
+            kept_member = True
+
+    if not kept_member:
+        out.append(f"{body_indent}...")
+    return out
+
+
+def _aggressive_python_fallback(content: str) -> str:
+    """Line-based fallback when Python source cannot be parsed by ast.parse."""
     lines = content.splitlines()
     result: list[str] = []
     skip_until_indent: int | None = None
@@ -156,7 +251,6 @@ def _aggressive_python(content: str) -> str:
         stripped = line.strip()
         indent = len(line) - len(line.lstrip()) if stripped else 999
 
-        # Resume from skip when we dedent back to signature level
         if skip_until_indent is not None:
             if stripped and indent <= skip_until_indent:
                 skip_until_indent = None
@@ -174,7 +268,6 @@ def _aggressive_python(content: str) -> str:
         if is_keep:
             if is_sig:
                 sig_indent = indent
-                # Collect all lines that make up the signature (for multi-line signatures)
                 while i < len(lines):
                     sig_line = lines[i]
                     result.append(sig_line)
@@ -184,14 +277,13 @@ def _aggressive_python(content: str) -> str:
                         break
                     i += 1
 
-                # Look ahead for docstring
                 j = i + 1
                 while j < len(lines) and not lines[j].strip():
                     j += 1
                 if j < len(lines) and lines[j].strip().startswith(('"""', "'''")):
                     quote = lines[j].strip()[:3]
                     result.append(lines[j])
-                    if lines[j].count(quote) < 2:  # multi-line docstring
+                    if lines[j].count(quote) < 2:
                         j += 1
                         while j < len(lines):
                             result.append(lines[j])
@@ -203,7 +295,6 @@ def _aggressive_python(content: str) -> str:
                         j += 1
                     i = j - 1
 
-                # Add ellipsis body placeholder and start skipping
                 body_indent = " " * (sig_indent + 4)
                 result.append(f"{body_indent}...")
                 skip_until_indent = sig_indent
@@ -213,10 +304,35 @@ def _aggressive_python(content: str) -> str:
                 result.append(line)
 
         elif indent == 0 and stripped and "=" in stripped:
-            # Keep module-level assignments (constants, __all__, etc.)
             result.append(line)
 
         i += 1
+
+    return "\n".join(result)
+
+
+def _aggressive_python(content: str) -> str:
+    """Python: keep imports, assignments, decorators, class/def signatures + docstrings. Drop bodies."""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return _aggressive_python_fallback(content)
+
+    lines = content.splitlines()
+    result: list[str] = []
+
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            end_line = node.end_lineno or node.lineno
+            result.extend(lines[node.lineno - 1 : end_line])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if result and result[-1] != "":
+                result.append("")
+            result.extend(_format_func_stub(node, lines))
+        elif isinstance(node, ast.ClassDef):
+            if result and result[-1] != "":
+                result.append("")
+            result.extend(_format_class_stub(node, lines))
 
     return "\n".join(result)
 

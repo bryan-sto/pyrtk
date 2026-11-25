@@ -3,26 +3,47 @@ from __future__ import annotations
 
 import re
 
+_MAX_PATCH_CHARS = 12000
+
+
+def split_git_subcommand(args: list[str]) -> tuple[list[str], str, list[str]]:
+    """Split git args into (prefix_with_leading_flags, subcommand, remaining_args)."""
+    if not args or args[0] != "git":
+        return args, "", []
+
+    idx = 1
+    while idx < len(args):
+        arg = args[idx]
+        if arg == "-C" and idx + 1 < len(args):
+            idx += 2
+            continue
+        if arg.startswith("-C") and len(arg) > 2:
+            idx += 1
+            continue
+        break
+
+    if idx >= len(args):
+        return args, "", []
+    return args[:idx], args[idx], args[idx + 1 :]
+
 
 def get_optimised_git_command(args: list[str]) -> list[str]:
     """Intercepts git status, diff, or log to return the optimised command array."""
-    if not args or args[0] != "git":
-        return args
-    if len(args) < 2:
+    prefix, sub, rest = split_git_subcommand(args)
+    if not sub:
         return args
 
-    sub = args[1]
     if sub == "status":
-        return ["git", "status", "--porcelain"] + args[2:]
+        return prefix + ["status", "--porcelain", "-b"] + rest
     elif sub == "diff":
-        has_stat_option = any(arg in args for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
+        has_stat_option = any(arg in rest for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
         if not has_stat_option:
-            return ["git", "diff", "--stat"] + args[2:]
+            return prefix + ["diff", "--stat"] + rest
         return args
     elif sub == "log":
-        has_format = any(a.startswith("--format") or a.startswith("--pretty") or a == "--oneline" for a in args)
+        has_format = any(a.startswith("--format") or a.startswith("--pretty") or a == "--oneline" for a in rest)
         if not has_format:
-            return ["git", "log", "--oneline"] + args[2:]
+            return prefix + ["log", "--oneline"] + rest
         return args
     return args
 
@@ -37,9 +58,13 @@ def run(args: list[str], verbose: bool = False) -> None:
 def _filter_status(raw: str) -> str:
     if not raw.strip():
         return "clean"
+    branch_header: str | None = None
     modified = []
     untracked_count = 0
     for line in raw.splitlines():
+        if line.startswith("## "):
+            branch_header = line.strip()
+            continue
         if len(line) < 3:
             continue
         status = line[:2]
@@ -50,6 +75,8 @@ def _filter_status(raw: str) -> str:
             modified.append(f"{status.strip()} {file_path}")
 
     parts = []
+    if branch_header:
+        parts.append(branch_header)
     if modified:
         if len(modified) <= 15:
             parts.append(f"modified: {', '.join(modified)}")
@@ -57,6 +84,8 @@ def _filter_status(raw: str) -> str:
             parts.append(f"modified: {', '.join(modified[:15])} ... (+{len(modified) - 15} more files)")
     if untracked_count:
         parts.append(f"untracked: {untracked_count} file(s)")
+    if branch_header and not modified and not untracked_count:
+        parts.append("clean")
     return "\n".join(parts) if parts else "clean"
 
 
@@ -74,7 +103,9 @@ def _filter_diff(raw: str, args: list[str]) -> str:
     has_stat_option = any(arg in args for arg in ("--stat", "--name-only", "--name-status", "-p", "--patch"))
     if has_stat_option:
         if any(arg in args for arg in ("-p", "--patch")):
-            return raw[:400]
+            if len(raw) > _MAX_PATCH_CHARS:
+                return raw[:_MAX_PATCH_CHARS] + f"\n[... diff truncated at {_MAX_PATCH_CHARS} chars]"
+            return raw
         return raw
 
     lines = [line for line in raw.splitlines() if line.strip()]
@@ -99,7 +130,9 @@ def _filter_simple(raw: str, sub: str) -> str:
     if sub == "push":
         branch = re.search(r'(HEAD -> |origin/)([^\s]+)', raw)
         return f"ok {branch.group(2) if branch else 'done'}"
-    if sub in ("add", "commit"):
-        sha = re.search(r'([0-9a-f]{7})', raw)
-        return f"ok {sha.group(1) if sha else sub}"
+    if sub == "commit":
+        sha = re.search(r"\[[^\]]+\s+([0-9a-f]{7,40})\]", raw) or re.search(r"\b([0-9a-f]{7,40})\b", raw)
+        return f"ok {sha.group(1) if sha else 'commit'}"
+    if sub == "add":
+        return "ok add"
     return "ok"

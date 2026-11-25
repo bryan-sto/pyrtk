@@ -260,11 +260,11 @@ def rtk_passthrough(command: str, cwd: str = ".") -> str:
 
 @mcp.tool()
 def rtk_discover(since_hours: int = 24) -> str:
-    """Identify commands run in this session that bypassed pyrtk.
+    """Report pyrtk command coverage from recent command history.
 
-    Queries MemCore for recent command history and compares against
-    the list of commands pyrtk knows how to filter. Helps you spot
-    missed savings.
+    Queries MemCore for recent command history (falling back to local
+    registry.db command_history when MemCore is unavailable) and reports
+    which covered commands were used vs unused.
 
     Args:
         since_hours: How many hours of history to check (default: 24).
@@ -275,34 +275,41 @@ def rtk_discover(since_hours: int = 24) -> str:
     }
 
     write_log("DISCOVER", f"rtk_discover - hours: {since_hours}")
+    history: list[dict[str, str]] | None = None
+    source = "MemCore"
     try:
         res = requests.get(
             f"http://localhost:{_MEMCORE_PORT}/agentmemory/command/history",
             params={"hours": since_hours},
             timeout=3,
         )
-        if res.status_code != 200:
-            return f"MemCore error: HTTP {res.status_code}"
+        if res.status_code == 200:
+            history = res.json().get("commands", [])
+    except requests.exceptions.RequestException:
+        pass
 
-        history = res.json().get("commands", [])
-    except requests.exceptions.RequestException as e:
-        return f"MemCore unreachable: {e}"
+    if history is None:
+        from .registry import registry
+        source = "Local SQLite"
+        history = registry.get_command_history(since_hours=since_hours)
 
     if not history:
-        return f"No commands logged in the last {since_hours}h."
+        return f"No commands logged via pyrtk in the last {since_hours}h ({source})."
 
-    rtk_cmds = {r["command"].split()[0] for r in history if r.get("command")}
-    bypassed = _COVERED - rtk_cmds
+    used_cmds = {r["command"].split()[0] for r in history if r.get("command")}
+    used_covered = sorted(_COVERED & used_cmds)
+    unused_covered = sorted(_COVERED - used_cmds)
+    uncovered_used = sorted(used_cmds - _COVERED)
 
-    if not bypassed:
-        return f"All tracked commands routed through pyrtk in last {since_hours}h ✓"
-
-    lines = [f"Commands bypassing pyrtk in last {since_hours}h ({len(bypassed)} found):\n"]
-    for cmd in sorted(bypassed):
-        lines.append(f"  {cmd}")
+    lines = [f"pyrtk command coverage in last {since_hours}h ({source}, {len(history)} logged):"]
     lines.append(
-        "\nFix: ensure AGENTS.md instructs agy to use rtk_run_command for these commands."
+        f"  Covered commands used ({len(used_covered)}): {', '.join(used_covered) if used_covered else 'none'}"
     )
+    lines.append(
+        f"  Covered commands unused ({len(unused_covered)}): {', '.join(unused_covered) if unused_covered else 'none'}"
+    )
+    if uncovered_used:
+        lines.append(f"  Uncovered commands logged ({len(uncovered_used)}): {', '.join(uncovered_used)}")
     return "\n".join(lines)
 
 
@@ -362,7 +369,7 @@ def rtk_check_background(handle_id: str, tail_lines: int = 20) -> str:
 
 
 def _tail(path: str, n: int) -> str:
-    if not os.path.exists(path):
+    if n <= 0 or not os.path.exists(path):
         return ""
     try:
         with open(path, "rb") as f:
@@ -371,6 +378,8 @@ def _tail(path: str, n: int) -> str:
             block = min(size, max(8192, 128 * n))
             f.seek(-block, os.SEEK_END)
             lines = f.read().decode("utf-8", errors="replace").splitlines()
+            if size > block and lines:
+                lines = lines[1:]
             return "\n".join(lines[-n:])
     except Exception:
         return ""
@@ -391,6 +400,19 @@ def rtk_retrieve(ref: str) -> str:
         data = registry.ccr_retrieve(ref)
         return json.dumps(data, indent=2)
     except KeyError as e:
+        try:
+            res = requests.get(
+                f"http://localhost:{_MEMCORE_PORT}/agentmemory/ccr/retrieve",
+                params={"ref": ref},
+                timeout=2,
+            )
+            if res.status_code == 200:
+                try:
+                    return json.dumps(res.json(), indent=2)
+                except ValueError:
+                    return res.text
+        except requests.exceptions.RequestException:
+            pass
         return json.dumps({"error": str(e)})
 
 

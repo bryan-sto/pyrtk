@@ -9,12 +9,25 @@ from .utils import estimate_tokens
 
 def compress_json(data: Any, max_rows: int = 20) -> dict[str, Any]:
     """Compress JSON data by converting arrays of dicts to columnar form and applying CCR truncation."""
-    original_str = json.dumps(data)
+    original_str = json.dumps(data, separators=(",", ":"))
     orig_tokens = estimate_tokens(original_str)
 
     compressed_data = _compress_recursive(data, max_rows)
+    if compressed_data == data:
+        return {
+            "compressed": data,
+            "original_tokens_est": orig_tokens,
+            "compressed_tokens_est": orig_tokens,
+        }
 
-    compressed_str = json.dumps(compressed_data, indent=2)
+    compressed_str = json.dumps(compressed_data, separators=(",", ":"))
+    if len(compressed_str) >= len(original_str):
+        return {
+            "compressed": data,
+            "original_tokens_est": orig_tokens,
+            "compressed_tokens_est": orig_tokens,
+        }
+
     comp_tokens = estimate_tokens(compressed_str)
 
     return {
@@ -82,8 +95,8 @@ def _compress_columnar(rows: list[dict[str, Any]], max_rows: int) -> dict[str, A
         dominant_count = val_counts[dominant_key]
         dominant_val = val_by_key[dominant_key]
 
-        # Check if dominant value is >=90% of rows
-        if dominant_count / total_rows >= 0.9:
+        # Check if dominant value is >=90% of rows; skip placeholder hoisting if literal "_" collides
+        if dominant_count / total_rows >= 0.9 and not ("_" in val_counts and dominant_key != "_"):
             defaults[k] = dominant_val
 
             # If not 100% identical, we keep key in schema to show deviations
@@ -139,16 +152,16 @@ def _truncate_generic(data: Any, max_rows: int) -> Any:
     if isinstance(data, list):
         if len(data) > max_rows:
             half = max_rows // 2
-            keep_first = data[:half]
-            keep_last = data[-half:]
-            omitted = data[half:-half]
+            keep_first = [_compress_recursive(x, max_rows) for x in data[:half]] if half > 0 else []
+            keep_last = [_compress_recursive(x, max_rows) for x in data[-half:]] if half > 0 else []
+            omitted = data[half : len(data) - half]
 
             from ..registry import registry
             ref = registry.ccr_store(omitted, source_tool="json_compress")
 
             return keep_first + [{"ref": ref, "omitted": len(omitted)}] + keep_last
         else:
-            return [_truncate_generic(x, max_rows) for x in data]
+            return [_compress_recursive(x, max_rows) for x in data]
     elif isinstance(data, dict):
-        return {k: _truncate_generic(v, max_rows) for k, v in data.items()}
+        return {k: _compress_recursive(v, max_rows) for k, v in data.items()}
     return data

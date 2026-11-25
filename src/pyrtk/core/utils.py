@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 _ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 _TIMEOUT = int(os.getenv("RTK_TIMEOUT", "120"))
@@ -75,14 +76,22 @@ def get_execution_env(cwd: str = ".") -> dict[str, str]:
     env["PYTHONUTF8"] = "1"
     env["LC_ALL"] = "en_US.UTF-8"
 
-    target_venv = os.path.join(cwd, ".venv")
-    if os.path.exists(target_venv):
-        scripts_dir = os.path.join(target_venv, "Scripts" if sys.platform == "win32" else "bin")
-        if os.path.exists(scripts_dir):
-            env["PATH"] = scripts_dir + os.pathsep + env.get("PATH", "")
-            env["VIRTUAL_ENV"] = os.path.abspath(target_venv)
-        else:
-            env.pop("VIRTUAL_ENV", None)
+    current = Path(cwd).resolve()
+    for _ in range(5):  # cwd and up to 4 parent directories (monorepos)
+        found = False
+        for venv_name in (".venv", "venv"):
+            candidate = current / venv_name
+            scripts_dir = candidate / ("Scripts" if sys.platform == "win32" else "bin")
+            if scripts_dir.is_dir():
+                env["PATH"] = str(scripts_dir) + os.pathsep + env.get("PATH", "")
+                env["VIRTUAL_ENV"] = str(candidate)
+                found = True
+                break
+        if found:
+            break
+        if current.parent == current:
+            break
+        current = current.parent
 
     # Ensure current working directory is in PYTHONPATH so local packages/src resolve
     abs_cwd = os.path.abspath(cwd)

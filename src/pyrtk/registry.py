@@ -304,6 +304,25 @@ class ProcessRegistry:
         except Exception:
             pass
 
+    def get_command_history(self, since_hours: int = 24) -> list[dict[str, Any]]:
+        """Return locally logged commands from the last `since_hours` hours."""
+        cutoff_dt = datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=since_hours)
+        cutoff_iso = cutoff_dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        try:
+            with self._transaction() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT command, timestamp
+                    FROM command_history
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp DESC, id DESC
+                    """,
+                    (cutoff_iso,),
+                ).fetchall()
+                return [{"command": row[0], "timestamp": row[1]} for row in rows]
+        except Exception:
+            return []
+
     def get_local_stats(self) -> dict[str, Any]:
         """Aggregate local command savings stats."""
         try:

@@ -15,7 +15,14 @@ from ..cmds.cargo_cmd import _filter_cargo_build, _filter_cargo_clippy, _filter_
 from ..cmds.docker_cmd import _filter_ps
 from ..cmds.err_cmd import _filter_errors
 from ..cmds.find_cmd import _filter_find, _python_find
-from ..cmds.git import _filter_diff, _filter_log, _filter_simple, _filter_status, get_optimised_git_command
+from ..cmds.git import (
+    _filter_diff,
+    _filter_log,
+    _filter_simple,
+    _filter_status,
+    get_optimised_git_command,
+    split_git_subcommand,
+)
 from ..cmds.grep_cmd import _filter_grep
 from ..cmds.pip_cmd import _filter_list as _pip_list
 from ..cmds.pip_cmd import _filter_show as _pip_show
@@ -110,53 +117,79 @@ def dispatch_command(args: list[str], cwd: str = ".") -> CommandResult:
 
     # Special handling for internal commands (ls, read, and Windows find fallback)
     if main_cmd == "ls":
-        if cmd_args and cmd_args[0].startswith("-"):
-            stdout, stderr, code = execute_command(exec_cmd, cwd=cwd)
-        else:
-            target = Path(cmd_args[0]) if cmd_args else Path(cwd)
-            if not target.is_absolute():
-                target = Path(cwd) / target
-            if not target.exists():
-                exec_ms = int((time.time() - t0) * 1000)
-                return CommandResult(
-                    raw="",
-                    filtered=f"Path not found: {target}",
-                    exit_code=1,
-                    exec_ms=exec_ms,
-                )
-            if target.is_file():
-                filtered = f"{target.name} ({target.stat().st_size}B)"
-                exec_ms = int((time.time() - t0) * 1000)
-                return CommandResult(raw=filtered, filtered=filtered, exit_code=0, exec_ms=exec_ms)
-            try:
-                items = sorted(target.iterdir())
-            except PermissionError:
-                exec_ms = int((time.time() - t0) * 1000)
-                return CommandResult(
-                    raw="",
-                    filtered=f"Permission denied: {target}",
-                    exit_code=1,
-                    exec_ms=exec_ms,
-                )
-            dirs, files_count = [], 0
-            for item in items:
-                if item.name.startswith("."):
-                    continue
-                if item.is_dir():
-                    try:
-                        children = list(itertools.islice((f for f in item.iterdir() if f.is_file()), 51))
-                        label = f"{len(children)} files" if len(children) < 51 else "50+ files"
-                    except PermissionError:
-                        label = "no access"
-                    dirs.append(f"{item.name}/ ({label})")
-                elif item.is_file():
-                    files_count += 1
-            parts = dirs
-            if files_count:
-                parts.append(f"files: {files_count} file(s) in root")
-            filtered = "\n".join(parts) if parts else "empty directory"
+        ls_flags: list[str] = []
+        ls_paths: list[str] = []
+        for arg in cmd_args:
+            if arg.startswith("-") and len(arg) > 1:
+                ls_flags.append(arg)
+            else:
+                ls_paths.append(arg)
+
+        show_all = any(
+            f in ("--all", "-A", "--almost-all")
+            or (not f.startswith("--") and ("a" in f[1:] or "A" in f[1:]))
+            for f in ls_flags
+        )
+        long_format = any(not f.startswith("--") and "l" in f[1:] for f in ls_flags)
+
+        target = Path(ls_paths[0]) if ls_paths else Path(cwd)
+        if not target.is_absolute():
+            target = Path(cwd) / target
+        if not target.exists():
+            exec_ms = int((time.time() - t0) * 1000)
+            return CommandResult(
+                raw="",
+                filtered=f"Path not found: {target}",
+                exit_code=1,
+                exec_ms=exec_ms,
+            )
+        if target.is_file():
+            filtered = f"{target.name} ({target.stat().st_size}B)"
             exec_ms = int((time.time() - t0) * 1000)
             return CommandResult(raw=filtered, filtered=filtered, exit_code=0, exec_ms=exec_ms)
+        try:
+            items = sorted(target.iterdir())
+        except PermissionError:
+            exec_ms = int((time.time() - t0) * 1000)
+            return CommandResult(
+                raw="",
+                filtered=f"Permission denied: {target}",
+                exit_code=1,
+                exec_ms=exec_ms,
+            )
+        dirs, file_lines, dotfiles = [], [], []
+        files_count = 0
+        for item in items:
+            if not show_all and item.name.startswith("."):
+                continue
+            if item.is_dir():
+                try:
+                    children = list(itertools.islice((f for f in item.iterdir() if f.is_file()), 51))
+                    label = f"{len(children)} files" if len(children) < 51 else "50+ files"
+                except PermissionError:
+                    label = "no access"
+                dirs.append(f"{item.name}/ ({label})")
+            elif item.is_file():
+                files_count += 1
+                if long_format:
+                    try:
+                        size = item.stat().st_size
+                        file_lines.append(f"{item.name} ({size}B)")
+                    except OSError:
+                        file_lines.append(item.name)
+                elif show_all and item.name.startswith("."):
+                    dotfiles.append(item.name)
+        parts = dirs
+        if long_format:
+            parts.extend(file_lines)
+        else:
+            if dotfiles:
+                parts.append(f"dotfiles: {', '.join(dotfiles)}")
+            if files_count:
+                parts.append(f"files: {files_count} file(s) in root")
+        filtered = "\n".join(parts) if parts else "empty directory"
+        exec_ms = int((time.time() - t0) * 1000)
+        return CommandResult(raw=filtered, filtered=filtered, exit_code=0, exec_ms=exec_ms)
     elif main_cmd == "read":
         if cmd_args:
             filepath = Path(cwd) / cmd_args[0] if not Path(cmd_args[0]).is_absolute() else Path(cmd_args[0])
@@ -241,7 +274,7 @@ def dispatch_command(args: list[str], cwd: str = ".") -> CommandResult:
     # Route to filter
     try:
         if main_cmd == "git":
-            sub = cmd_args[0] if cmd_args else ""
+            _, sub, git_rest = split_git_subcommand(args)
             if sub == "status":
                 filtered = _filter_status(raw)
             elif sub == "log":
@@ -249,7 +282,7 @@ def dispatch_command(args: list[str], cwd: str = ".") -> CommandResult:
             elif sub in ("add", "commit", "push", "pull"):
                 filtered = _filter_simple(raw, sub)
             elif sub == "diff":
-                filtered = _filter_diff(raw, cmd_args)
+                filtered = _filter_diff(raw, git_rest)
             else:
                 filtered = raw
 
@@ -303,7 +336,7 @@ def dispatch_command(args: list[str], cwd: str = ".") -> CommandResult:
                 filtered = raw
 
         elif main_cmd == "err":
-            filtered = _filter_errors(stdout, stderr)
+            filtered = _filter_errors(strip_ansi(stdout), strip_ansi(stderr))
 
         elif main_cmd == "test":
             filtered = _filter_test_output(raw, code)
@@ -318,7 +351,10 @@ def dispatch_command(args: list[str], cwd: str = ".") -> CommandResult:
             if stripped and stripped[0] in ("{", "["):
                 json_data = json.loads(stripped)
                 res = compress_json(json_data)
-                filtered = json.dumps(res["compressed"], indent=2)
+                if res["compressed"] != json_data:
+                    compressed_json_str = json.dumps(res["compressed"], separators=(",", ":"))
+                    if len(compressed_json_str) < len(stripped):
+                        filtered = compressed_json_str
         except Exception:
             pass
 

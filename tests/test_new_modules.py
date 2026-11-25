@@ -383,11 +383,16 @@ def test_read_size_guard(tmp_path, monkeypatch):
 def test_git_optimised_command():
     from src.pyrtk.cmds.git import get_optimised_git_command
 
-    assert get_optimised_git_command(["git", "status"]) == ["git", "status", "--porcelain"]
+    assert get_optimised_git_command(["git", "status"]) == ["git", "status", "--porcelain", "-b"]
+    assert get_optimised_git_command(["git", "-C", "/repo", "status"]) == [
+        "git", "-C", "/repo", "status", "--porcelain", "-b"
+    ]
     assert get_optimised_git_command(["git", "diff"]) == ["git", "diff", "--stat"]
+    assert get_optimised_git_command(["git", "-C", "/repo", "diff"]) == ["git", "-C", "/repo", "diff", "--stat"]
     assert get_optimised_git_command(["git", "diff", "HEAD~1"]) == ["git", "diff", "--stat", "HEAD~1"]
     assert get_optimised_git_command(["git", "diff", "--name-only"]) == ["git", "diff", "--name-only"]
     assert get_optimised_git_command(["git", "log"]) == ["git", "log", "--oneline"]
+    assert get_optimised_git_command(["git", "-C", "/repo", "log"]) == ["git", "-C", "/repo", "log", "--oneline"]
     assert get_optimised_git_command(["git", "log", "--oneline"]) == ["git", "log", "--oneline"]
     assert get_optimised_git_command(["git", "log", "--format=%s"]) == ["git", "log", "--format=%s"]
 
@@ -397,9 +402,14 @@ def test_git_diff_filter_custom_options():
 
     # Custom stat option `--name-only` should pass through verbatim
     assert _filter_diff("src/foo.py\nsrc/bar.py", ["--name-only"]) == "src/foo.py\nsrc/bar.py"
-    # Unified patch `-p` option should truncate to 400 chars
-    long_diff = "diff --git a/foo b/bar\n" + "a" * 500
-    assert len(_filter_diff(long_diff, ["-p"])) == 400
+    # Unified patch `-p` allows up to 12,000 chars without truncating at 400
+    medium_diff = "diff --git a/foo b/bar\n" + "a" * 500
+    assert _filter_diff(medium_diff, ["-p"]) == medium_diff
+    # Above 12,000 chars, `-p` truncates cleanly with a note
+    huge_diff = "diff --git a/foo b/bar\n" + "x" * 13000
+    out_huge = _filter_diff(huge_diff, ["--patch"])
+    assert "truncated at 12000 chars" in out_huge
+    assert out_huge.startswith(huge_diff[:12000])
 
 
 def test_aggressive_brace_nesting():
@@ -1328,3 +1338,268 @@ def test_tracker_submits_telemetry_and_flushes(monkeypatch):
     assert len(posted) == 1
     assert posted[0][0].endswith("/agentmemory/command/log")
     assert posted[0][1]["command"] == "git status"
+
+
+def test_git_status_branch_header_and_simple_sha():
+    from src.pyrtk.cmds.git import _filter_simple, _filter_status
+
+    raw_dirty = "## feature/rtk-09...origin/feature/rtk-09 [ahead 2]\n M src/app.py\n?? new.py\n"
+    out_dirty = _filter_status(raw_dirty)
+    lines = out_dirty.splitlines()
+    assert lines[0] == "## feature/rtk-09...origin/feature/rtk-09 [ahead 2]"
+    assert "modified: M src/app.py" in out_dirty
+    assert "untracked: 1 file(s)" in out_dirty
+    assert "modified: ##" not in out_dirty
+
+    raw_clean = "## main...origin/main\n"
+    out_clean = _filter_status(raw_clean)
+    assert out_clean == "## main...origin/main\nclean"
+
+    # git add should not match 7-hex substrings in filenames
+    assert _filter_simple("add 'deadbeef_config.json'", "add") == "ok add"
+    assert _filter_simple("[main 1a2b3c4] feat: update", "commit") == "ok 1a2b3c4"
+
+
+def test_aggressive_python_ast_classes_methods_and_hash_defaults():
+    from src.pyrtk.core.filter import FilterLevel, code_filter
+
+    code = (
+        "import os\n"
+        "MAX_ITEMS = 10\n\n"
+        "class DataClient:\n"
+        '    """Client docstring."""\n'
+        "    timeout: int = 30\n\n"
+        "    async def fetch(\n"
+        "        self,\n"
+        '        sep: str = "#",\n'
+        "    ) -> str:\n"
+        '        """Fetch remote payload."""\n'
+        "        body = f'{sep}data'\n"
+        "        return body\n\n"
+        "    def close(self) -> None:\n"
+        "        self._closed = True\n"
+    )
+    out = code_filter(code, "python", FilterLevel.AGGRESSIVE)
+    assert "import os" in out
+    assert "MAX_ITEMS = 10" in out
+    assert "class DataClient:" in out
+    assert '"""Client docstring."""' in out
+    assert "timeout: int = 30" in out
+    assert "async def fetch(" in out
+    assert 'sep: str = "#",' in out
+    assert '"""Fetch remote payload."""' in out
+    assert "def close(self) -> None:" in out
+    assert "..." in out
+    assert "self._closed = True" not in out
+    assert "return body" not in out
+
+    # SyntaxError falls back cleanly to line-based parser
+    broken = "def broken(x):\n    y = (\n    return x\n"
+    out_broken = code_filter(broken, "python", FilterLevel.AGGRESSIVE)
+    assert "def broken(x):" in out_broken
+    assert "..." in out_broken
+
+
+def test_minimal_filter_preserves_block_comments_inside_strings():
+    from src.pyrtk.core.filter import _minimal_filter
+
+    ts_code = (
+        'const pattern1 = "src/**/*.ts";\n'
+        'const pattern2 = "tests/**/*.ts";\n'
+        "const literal = '/* glob */';\n"
+        "/* real block comment\n"
+        "   should be removed */\n"
+        "export const ok = true;\n"
+    )
+    out = _minimal_filter(ts_code, "typescript")
+    assert 'const pattern1 = "src/**/*.ts";' in out
+    assert 'const pattern2 = "tests/**/*.ts";' in out
+    assert "const literal = '/* glob */';" in out
+    assert "export const ok = true;" in out
+    assert "real block comment" not in out
+
+
+def test_json_compress_small_passthrough_literal_underscore_and_recursive_generic(tmp_path):
+    from src.pyrtk.core.json_compress import compress_json
+    from src.pyrtk.registry import registry
+
+    old_db = registry.db_path
+    registry.db_path = tmp_path / "test_registry_p2.db"
+    registry._init_db()
+    try:
+        # Small object passthrough
+        small_obj = {"status": "ok", "count": 1}
+        res_small = compress_json(small_obj)
+        assert res_small["compressed"] == small_obj
+        assert res_small["original_tokens_est"] == res_small["compressed_tokens_est"]
+
+        # Small 1-row list passthrough (columnar wrapper would be larger)
+        small_list = [{"id": 1, "name": "alpha"}]
+        res_list = compress_json(small_list)
+        assert res_list["compressed"] == small_list
+
+        # Literal "_" disambiguation
+        rows_with_underscore = [{"id": i, "sym": "active"} for i in range(19)] + [{"id": 19, "sym": "_"}]
+        res_u = compress_json(rows_with_underscore, max_rows=30)
+        comp_u = res_u["compressed"]
+        sym_idx = comp_u["schema"].index("sym")
+        assert comp_u["rows"][0][sym_idx] == "active"
+        assert comp_u["rows"][19][sym_idx] == "_"
+
+        # Recursive generic truncation compresses nested list-of-dicts inside keep_first & keep_last
+        nested_first = {"items": [{"id": i, "kind": "widget"} for i in range(20)]}
+        nested_last = {"items": [{"id": i, "kind": "gadget"} for i in range(20)]}
+        heterogeneous = [nested_first] + [f"pad_{i}" for i in range(20)] + [nested_last]
+        res_gen = compress_json(heterogeneous, max_rows=6)
+        comp_gen = res_gen["compressed"]
+        assert "schema" in comp_gen[0]["items"]
+        assert "defaults" in comp_gen[0]["items"]
+        assert "schema" in comp_gen[-1]["items"]
+        assert "defaults" in comp_gen[-1]["items"]
+    finally:
+        registry.db_path = old_db
+
+
+def test_dispatcher_ls_flags_err_ansi_and_grep_no_tee(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from src.pyrtk.core.dispatcher import dispatch_command
+
+    # ls -la should parse flags separately and show dotfiles
+    (tmp_path / ".hidden").write_text("secret", encoding="utf-8")
+    (tmp_path / ".hiddendir").mkdir()
+    (tmp_path / "visible.txt").write_text("hi", encoding="utf-8")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / ".subdot").write_text("x", encoding="utf-8")
+
+    res_ls = dispatch_command(["ls", "-la"], cwd=str(tmp_path))
+    assert res_ls.exit_code == 0
+    assert ".hidden (6B)" in res_ls.filtered
+    assert ".hiddendir/" in res_ls.filtered
+    assert "visible.txt (2B)" in res_ls.filtered
+
+    res_ls_sub = dispatch_command(["ls", "-la", "sub"], cwd=str(tmp_path))
+    assert res_ls_sub.exit_code == 0
+    assert ".subdot (1B)" in res_ls_sub.filtered
+
+    # err strips ANSI from stdout and stderr before _filter_errors
+    monkeypatch.setattr(
+        "src.pyrtk.core.dispatcher.execute_command",
+        lambda cmd, cwd=".": ("\x1b[31mError: failed step\x1b[0m\ninfo\n", "\x1b[33mwarn stderr\x1b[0m\n", 1),
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    res_err = dispatch_command(["err", "fake"], cwd=str(tmp_path))
+    assert "\x1b[" not in res_err.filtered
+    assert "Error: failed step" in res_err.filtered
+    assert "warn stderr" in res_err.filtered
+
+    # grep/rg exit code 1 should not create tee logs even when raw > 200 chars
+    monkeypatch.setattr(
+        "src.pyrtk.core.dispatcher.execute_command",
+        lambda cmd, cwd=".": ("", "x" * 250, 1),
+    )
+    res_rg = dispatch_command(["rg", "missing", "."], cwd=str(tmp_path))
+    assert res_rg.exit_code == 1
+    assert res_rg.tee_path is None
+
+    # small JSON output from command is not expanded into larger pretty-printed JSON
+    monkeypatch.setattr(
+        "src.pyrtk.core.dispatcher.execute_command",
+        lambda cmd, cwd=".": ('{"ok":true}', "", 0),
+    )
+    res_json = dispatch_command(["custom", "cmd"], cwd=str(tmp_path))
+    assert res_json.filtered == '{"ok":true}'
+
+
+def test_tail_drops_partial_first_line(tmp_path):
+    from src.pyrtk.mcp_server import _tail
+
+    log_file = tmp_path / "big.log"
+    # Build > 8192 bytes so size > block in _tail(path, 5)
+    lines = [f"line_{i:04d}_" + ("a" * 80) for i in range(150)]
+    log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    tailed = _tail(str(log_file), 5)
+    tailed_lines = tailed.splitlines()
+    assert len(tailed_lines) == 5
+    assert tailed_lines == lines[-5:]
+
+
+def test_get_execution_env_monorepo_parent_venv(tmp_path, monkeypatch):
+    import sys
+
+    from src.pyrtk.core.utils import get_execution_env
+
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    scripts_sub = "Scripts" if sys.platform == "win32" else "bin"
+
+    # 3 parents above cwd (within 4-parent limit)
+    repo_root = tmp_path / "mono"
+    venv_scripts = repo_root / "venv" / scripts_sub
+    venv_scripts.mkdir(parents=True)
+    nested_cwd = repo_root / "packages" / "svc" / "src"
+    nested_cwd.mkdir(parents=True)
+
+    env = get_execution_env(str(nested_cwd))
+    assert env.get("VIRTUAL_ENV") == str((repo_root / "venv").resolve())
+    assert str(venv_scripts.resolve()) in env["PATH"].split(";") or str(venv_scripts.resolve()) in env["PATH"]
+
+    # 5 parents above cwd (beyond 4-parent limit) should NOT be picked up
+    deep_cwd = tmp_path / "far" / "a" / "b" / "c" / "d" / "e"
+    deep_scripts = tmp_path / "far" / ".venv" / scripts_sub
+    deep_scripts.mkdir(parents=True)
+    deep_cwd.mkdir(parents=True)
+
+    env_far = get_execution_env(str(deep_cwd))
+    assert "VIRTUAL_ENV" not in env_far
+
+
+def test_rtk_discover_and_retrieve_memcore_fallback(tmp_path, monkeypatch):
+    import json
+
+    import requests
+
+    from src.pyrtk import mcp_server
+    from src.pyrtk.registry import registry
+
+    old_db = registry.db_path
+    registry.db_path = tmp_path / "test_discover.db"
+    registry._init_db()
+    try:
+        registry.log_command(
+            mcp_server.utc_now_iso(),
+            "rtk",
+            "git status",
+            100,
+            20,
+            80,
+            80.0,
+            10,
+        )
+
+        # rtk_discover falls back to local SQLite when MemCore raises RequestException
+        def fake_get_fail(url, params=None, timeout=None):
+            if "/agentmemory/command/history" in url:
+                raise requests.exceptions.ConnectionError("MemCore offline")
+            if "/agentmemory/ccr/retrieve" in url:
+                class _Resp:
+                    status_code = 200
+                    def json(self):
+                        return {"restored": [1, 2, 3]}
+                return _Resp()
+            raise AssertionError(f"Unexpected URL: {url}")
+
+        monkeypatch.setattr(mcp_server.requests, "get", fake_get_fail)
+
+        disc = mcp_server.rtk_discover(since_hours=24)
+        assert "Local SQLite" in disc
+        assert "Covered commands used (1): git" in disc
+        assert "Covered commands unused" in disc
+        assert "bypassing" not in disc.lower()
+
+        # rtk_retrieve falls back to MemCore on local CCR miss
+        retrieved = json.loads(mcp_server.rtk_retrieve("ccr_missing_local"))
+        assert retrieved == {"restored": [1, 2, 3]}
+    finally:
+        registry.db_path = old_db
