@@ -1,7 +1,6 @@
 # src/pyrtk/tracker.py
 from __future__ import annotations
 
-import datetime
 import logging
 import os
 import threading
@@ -9,7 +8,7 @@ from pathlib import Path
 
 import requests
 
-from .core.utils import estimate_tokens, scrub_secrets
+from .core.utils import estimate_tokens, scrub_secrets, utc_now_iso
 from .registry import registry
 
 logger = logging.getLogger(__name__)
@@ -39,7 +38,7 @@ def track(
     pct = round((saved / inp * 100) if inp > 0 else 0.0, 1)
 
     project = Path(cwd).resolve().name
-    now_str = datetime.datetime.now(datetime.UTC).isoformat() + "Z"
+    now_str = utc_now_iso()
     clean_cmd = scrub_secrets(original_cmd)
 
     # Persist locally in SQLite registry first (guaranteed offline telemetry)

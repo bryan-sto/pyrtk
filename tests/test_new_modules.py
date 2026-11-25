@@ -236,7 +236,7 @@ def test_rtk_run_background_and_check(tmp_path):
     from src.pyrtk.mcp_server import rtk_check_background, rtk_run_command
 
     # Run background python sleep process
-    cmd = f'"{sys.executable}" -c "import time; time.sleep(0.1); print(\'done\')"'
+    cmd = f'"{sys.executable}" -c "import time; time.sleep(0.8); print(\'done\')"'
     res_str = rtk_run_command(cmd, cwd=str(tmp_path), background=True)
     res = json.loads(res_str)
 
@@ -722,4 +722,16 @@ def test_grep_filter_windows_path_and_no_em_dash():
     assert "2 match(es) in 2 file(s)" in out
     assert "—" not in out
     assert "-" in out
+
+
+def test_utc_now_iso():
+    import datetime
+
+    from src.pyrtk.core.utils import utc_now_iso
+
+    ts = utc_now_iso()
+    assert ts.endswith("Z")
+    assert "+00:00Z" not in ts
+    parsed = datetime.datetime.fromisoformat(ts)
+    assert parsed.tzinfo is not None
 

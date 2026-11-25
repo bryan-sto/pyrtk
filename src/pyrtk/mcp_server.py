@@ -1,7 +1,6 @@
 # src/pyrtk/mcp_server.py
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import re
@@ -14,14 +13,14 @@ import requests
 from mcp.server.fastmcp import FastMCP
 
 from .core.dispatcher import dispatch_command
-from .core.utils import estimate_tokens, execute_command, get_execution_env, scrub_secrets
+from .core.utils import estimate_tokens, execute_command, get_execution_env, scrub_secrets, utc_now_iso
 
 
 # Custom logging matching memcore.log style with automatic rotation
 def write_log(tag: str, msg: str) -> None:
     """Write log messages to pyrtk.log matching MemCore format with rotation."""
     try:
-        now_str = datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        now_str = utc_now_iso()
         local_log = Path(__file__).parent.parent.parent / "pyrtk.log"
         if local_log.exists():
             log_path = local_log
@@ -66,7 +65,7 @@ def _log(command: str, cwd: str, raw: str, filtered: str, exec_ms: int) -> None:
     pct = round((saved / inp * 100) if inp > 0 else 0.0, 1)
 
     project = Path(cwd).resolve().name
-    now_str = datetime.datetime.now(datetime.UTC).isoformat() + "Z"
+    now_str = utc_now_iso()
     clean_cmd = scrub_secrets(command)
 
     # Persist locally in SQLite registry

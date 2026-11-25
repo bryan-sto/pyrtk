@@ -1,6 +1,7 @@
 # src/pyrtk/core/utils.py
 from __future__ import annotations
 
+import datetime
 import os
 import re
 import shutil
@@ -124,3 +125,8 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     return max(1, (len(text) + 3) // 4)
+
+
+def utc_now_iso() -> str:
+    """Return current UTC timestamp in ISO-8601 format with millisecond precision and Z suffix."""
+    return datetime.datetime.now(datetime.UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
