@@ -16,6 +16,7 @@ from .core.utils import (
     estimate_tokens,
     execute_command,
     get_execution_env,
+    resolve_executable,
     scrub_secrets,
     split_command,
     utc_now_iso,
@@ -150,7 +151,8 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
             r"\bpython\s+-m\s+http\.server\b",
             r"\bnode\s+--watch\b",
         ]
-        if any(re.search(pat, command) for pat in bg_patterns):
+        head = " ".join(args[:3])
+        if any(re.search(pat, head) for pat in bg_patterns):
             background = True
 
     if background:
@@ -158,8 +160,9 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
         log_dir.mkdir(parents=True, exist_ok=True)
         import uuid
         h_suffix = uuid.uuid4().hex[:8]
-        stdout_path = log_dir / f"{args[0]}_{h_suffix}_stdout.log"
-        stderr_path = log_dir / f"{args[0]}_{h_suffix}_stderr.log"
+        safe_cmd_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(args[0]).stem) or "cmd"
+        stdout_path = log_dir / f"{safe_cmd_name}_{h_suffix}_stdout.log"
+        stderr_path = log_dir / f"{safe_cmd_name}_{h_suffix}_stderr.log"
 
         creationflags = 0
         start_new_session = False
@@ -171,12 +174,14 @@ def rtk_run_command(command: str, cwd: str = ".", background: bool = False) -> s
             start_new_session = True
 
         env = get_execution_env(cwd)
+        resolved_cmd = resolve_executable(args[0], path=env.get("PATH"))
+        cmd_to_run = [resolved_cmd] + args[1:]
 
         try:
             import subprocess
             with open(stdout_path, "wb") as f_out, open(stderr_path, "wb") as f_err:
                 proc = subprocess.Popen(
-                    args,
+                    cmd_to_run,
                     stdout=f_out,
                     stderr=f_err,
                     stdin=subprocess.DEVNULL,

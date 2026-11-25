@@ -787,3 +787,86 @@ def test_split_command_posix():
         "foo bar",
     ]
 
+
+def test_rtk_run_background_resolves_cmd_executable(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    from src.pyrtk.mcp_server import rtk_run_command
+
+    resolved_target = str(tmp_path / "npm.cmd")
+    captured: dict = {}
+
+    def fake_resolve(cmd_name, path=None):
+        captured["resolved_input"] = cmd_name
+        return resolved_target
+
+    def fake_popen(cmd, **kwargs):
+        captured["popen_cmd"] = cmd
+        return SimpleNamespace(pid=4242, poll=lambda: None)
+
+    monkeypatch.setattr("src.pyrtk.mcp_server.resolve_executable", fake_resolve)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    res = json.loads(rtk_run_command("npm run dev", cwd=str(tmp_path), background=True))
+    assert res["pid"] == 4242
+    assert "handle_id" in res
+    assert captured["resolved_input"] == "npm"
+    assert captured["popen_cmd"] == [resolved_target, "run", "dev"]
+
+
+def test_rtk_run_background_sanitizes_log_filename(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    from src.pyrtk.mcp_server import rtk_run_command
+
+    def fake_popen(cmd, **kwargs):
+        return SimpleNamespace(pid=5150, poll=lambda: None)
+
+    monkeypatch.setattr("src.pyrtk.mcp_server.resolve_executable", lambda c, path=None: c)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    res = json.loads(rtk_run_command("./sub/my@app.sh --watch", cwd=str(tmp_path), background=True))
+    assert res["pid"] == 5150
+
+    log_files = list((tmp_path / ".pyrtk_logs").iterdir())
+    names = [p.name for p in log_files]
+    assert any(n.startswith("my_app_") and n.endswith("_stdout.log") for n in names)
+    assert any(n.startswith("my_app_") and n.endswith("_stderr.log") for n in names)
+
+
+def test_rtk_run_bg_patterns_scoped_to_head(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    from src.pyrtk.mcp_server import rtk_run_command
+
+    calls = {"dispatch": 0, "popen": 0}
+
+    def fake_dispatch(args, cwd="."):
+        calls["dispatch"] += 1
+        return SimpleNamespace(raw="ok", filtered="ok", exit_code=0, exec_ms=1)
+
+    def fake_popen(cmd, **kwargs):
+        calls["popen"] += 1
+        return SimpleNamespace(pid=6161, poll=lambda: None)
+
+    monkeypatch.setattr("src.pyrtk.mcp_server.dispatch_command", fake_dispatch)
+    monkeypatch.setattr("src.pyrtk.mcp_server._log", lambda *a, **kw: None)
+    monkeypatch.setattr("src.pyrtk.mcp_server.resolve_executable", lambda c, path=None: c)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    sync_out = rtk_run_command('git commit -m "fix npm run dev"', cwd=str(tmp_path))
+    assert sync_out == "ok"
+    assert calls["dispatch"] == 1
+    assert calls["popen"] == 0
+
+    bg_out = json.loads(rtk_run_command("npm run dev", cwd=str(tmp_path)))
+    assert bg_out["pid"] == 6161
+    assert calls["dispatch"] == 1
+    assert calls["popen"] == 1
+
