@@ -935,9 +935,248 @@ def test_process_sweep_prunes_old_tee_logs(tmp_path, monkeypatch):
     os.utime(old_log, (old_mtime, old_mtime))
 
     reg = ProcessRegistry(db_dir=tmp_path / "db")
-    reg.process_sweep(max_age_seconds=50)
+    reg.process_sweep(max_age_seconds=50, force=True)
 
     assert not old_log.exists()
     assert new_log.exists()
+    reg.close()
+
+
+def test_registry_secondary_indexes_and_persistent_connection(tmp_path):
+    from src.pyrtk.registry import ProcessRegistry
+
+    reg = ProcessRegistry(db_dir=tmp_path)
+    try:
+        conn1 = reg._connect()
+        conn2 = reg._connect()
+        assert conn1 is conn2
+
+        indexes = {
+            row[0]
+            for row in conn1.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        assert "idx_cmd_history_ts" in indexes
+        assert "idx_ccr_created" in indexes
+        assert "idx_bg_ended_started" in indexes
+
+        journal_mode = conn1.execute("PRAGMA journal_mode;").fetchone()[0]
+        auto_vacuum = conn1.execute("PRAGMA auto_vacuum;").fetchone()[0]
+        busy_timeout = conn1.execute("PRAGMA busy_timeout;").fetchone()[0]
+        assert str(journal_mode).lower() == "wal"
+        assert auto_vacuum == 2
+        assert busy_timeout == 10000
+    finally:
+        reg.close()
+
+    assert reg._conn is None
+    # Reopens cleanly on demand after close()
+    assert reg.get_local_stats()["total_commands"] == 0
+    reg.close()
+
+
+def test_registry_command_history_pruning(tmp_path):
+    import datetime
+
+    from src.pyrtk.registry import ProcessRegistry
+
+    reg = ProcessRegistry(db_dir=tmp_path)
+    try:
+        now_dt = datetime.datetime.now(datetime.UTC)
+        old_ts = (now_dt - datetime.timedelta(days=45)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        with reg._transaction() as conn:
+            # Insert expired rows (>30 days)
+            for i in range(5):
+                conn.execute(
+                    """
+                    INSERT INTO command_history (timestamp, project, command, input_t, output_t, saved_t, pct, exec_ms)
+                    VALUES (?, 'proj', ?, 10, 5, 5, 50.0, 1)
+                    """,
+                    (old_ts, f"old_{i}"),
+                )
+            # Insert 5,020 recent rows with strictly increasing timestamps
+            base_dt = now_dt - datetime.timedelta(hours=2)
+            rows = [
+                (
+                    (base_dt + datetime.timedelta(seconds=i)).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    "proj",
+                    f"cmd_{i}",
+                    10,
+                    5,
+                    5,
+                    50.0,
+                    1,
+                )
+                for i in range(5020)
+            ]
+            conn.executemany(
+                """
+                INSERT INTO command_history (timestamp, project, command, input_t, output_t, saved_t, pct, exec_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        reg.process_sweep(force=True)
+
+        with reg._transaction() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM command_history").fetchone()[0]
+            old_left = conn.execute(
+                "SELECT COUNT(*) FROM command_history WHERE command LIKE 'old_%'"
+            ).fetchone()[0]
+            dropped_oldest = conn.execute(
+                "SELECT COUNT(*) FROM command_history WHERE command = 'cmd_0'"
+            ).fetchone()[0]
+            kept_newest = conn.execute(
+                "SELECT COUNT(*) FROM command_history WHERE command = 'cmd_5019'"
+            ).fetchone()[0]
+
+        assert total == 5000
+        assert old_left == 0
+        assert dropped_oldest == 0
+        assert kept_newest == 1
+    finally:
+        reg.close()
+
+
+def test_registry_startup_sweeps_dead_pids(tmp_path):
+    import os
+    import time
+
+    import psutil
+
+    from src.pyrtk.registry import ProcessRegistry
+
+    reg1 = ProcessRegistry(db_dir=tmp_path)
+    alive_pid = os.getpid()
+    alive_ctime = psutil.Process(alive_pid).create_time()
+
+    with reg1._transaction() as conn:
+        # Dead / nonexistent PID
+        conn.execute(
+            """
+            INSERT INTO background_processes (handle_id, pid, cmd, stdout_log, stderr_log, started_at)
+            VALUES ('dead-1', 99999999, '["sleep"]', 'out.log', 'err.log', ?)
+            """,
+            (time.time(),),
+        )
+        # Recycled PID (started_at far from current process create_time)
+        conn.execute(
+            """
+            INSERT INTO background_processes (handle_id, pid, cmd, stdout_log, stderr_log, started_at)
+            VALUES ('recycled-1', ?, '["sleep"]', 'out.log', 'err.log', ?)
+            """,
+            (alive_pid, alive_ctime - 1000.0),
+        )
+        # Genuinely alive PID
+        conn.execute(
+            """
+            INSERT INTO background_processes (handle_id, pid, cmd, stdout_log, stderr_log, started_at)
+            VALUES ('alive-1', ?, '["sleep"]', 'out.log', 'err.log', ?)
+            """,
+            (alive_pid, alive_ctime),
+        )
+    reg1.close()
+
+    reg2 = ProcessRegistry(db_dir=tmp_path)
+    try:
+        dead_entry = reg2.get("dead-1")
+        assert dead_entry.ended_at is not None
+        assert dead_entry.exit_code == -1
+
+        recycled_entry = reg2.get("recycled-1")
+        assert recycled_entry.ended_at is not None
+        assert recycled_entry.exit_code == -1
+
+        alive_entry = reg2.get("alive-1")
+        assert alive_entry.ended_at is None
+        assert alive_entry.exit_code is None
+    finally:
+        reg2.close()
+
+
+def test_registry_sweep_rate_limit_and_incremental_vacuum(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    from src.pyrtk.registry import CCR_MAX_DB_BYTES, ProcessRegistry
+
+    reg = ProcessRegistry(db_dir=tmp_path)
+    try:
+        # Insert an already-expired CCR entry directly without triggering sweep
+        with reg._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO ccr_cache (ref, original, created_at, ttl_seconds, source_tool)
+                VALUES ('ccr_expired', X'789c', 1.0, 1, 'test')
+                """
+            )
+
+        # Within 300s rate limit, force=False skips sweep
+        reg.ccr_sweep()
+        with reg._transaction() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM ccr_cache").fetchone()[0] == 1
+
+        # Populate 5 valid entries and simulate >500 MB db_path
+        for i in range(5):
+            reg.ccr_store({"i": i})
+
+        real_stat = Path.stat
+
+        def fake_stat(self, *args, **kwargs):
+            st = real_stat(self, *args, **kwargs)
+            if self == reg.db_path:
+                return os.stat_result(
+                    (
+                        st.st_mode,
+                        st.st_ino,
+                        st.st_dev,
+                        st.st_nlink,
+                        st.st_uid,
+                        st.st_gid,
+                        CCR_MAX_DB_BYTES + 1024,
+                        st.st_atime,
+                        st.st_mtime,
+                        st.st_ctime,
+                    )
+                )
+            return st
+
+        monkeypatch.setattr(Path, "stat", fake_stat)
+        reg.ccr_sweep(force=True)
+
+        with reg._transaction() as conn:
+            # Expired row removed, and 1/5 of the 5 remaining rows (1 row) evicted
+            remaining = conn.execute("SELECT COUNT(*) FROM ccr_cache").fetchone()[0]
+        assert remaining == 4
+    finally:
+        reg.close()
+
+
+def test_registry_lazy_proxy(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import src.pyrtk.registry as reg_mod
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    old_instance = reg_mod._registry_instance
+    reg_mod._registry_instance = None
+
+    try:
+        assert reg_mod._registry_instance is None
+        assert "uninitialized" in repr(reg_mod.registry)
+        assert reg_mod._registry_instance is None
+
+        # Accessing an attribute initializes the singleton lazily
+        db_path = reg_mod.registry.db_path
+        assert reg_mod._registry_instance is not None
+        assert db_path.exists()
+        assert reg_mod.get_registry() is reg_mod._registry_instance
+    finally:
+        if reg_mod._registry_instance is not None:
+            reg_mod._registry_instance.close()
+        reg_mod._registry_instance = old_instance
 
 
