@@ -160,7 +160,7 @@ def _aggressive_filter(content: str, language: str) -> str:
         return _aggressive_python(content)
     if language in ("javascript", "typescript", "go", "rust", "java", "csharp", "c", "kotlin"):
         return _aggressive_brace(content)
-    return content  # unsupported — return minimal-filtered
+    return content  # unsupported - return minimal-filtered
 
 
 def _is_docstring_stmt(stmt: ast.stmt) -> bool:

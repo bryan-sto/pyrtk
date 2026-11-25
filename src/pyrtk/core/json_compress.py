@@ -43,7 +43,7 @@ def _is_homogeneous_dict_list(data: Any) -> bool:
 
 def _compress_recursive(data: Any, max_rows: int) -> Any:
     """Walk the structure and apply columnar compression to any list-of-dicts found
-    at any depth — not just at the top level. Most real API responses wrap their
+    at any depth - not just at the top level. Most real API responses wrap their
     array under a key (e.g. {"data": [...]}, {"matches": [...]}), so top-level-only
     detection misses the majority of real-world payloads."""
     if _is_homogeneous_dict_list(data):
@@ -73,7 +73,7 @@ def _compress_columnar(rows: list[dict[str, Any]], max_rows: int) -> dict[str, A
         val_counts: dict[Any, int] = {}
         # Track original (unhashable-safe) values alongside their counting key,
         # so we never have to guess whether a string was real data or a
-        # serialization workaround — this avoids misinterpreting a genuine
+        # serialization workaround - this avoids misinterpreting a genuine
         # string value like "[DEPRECATED]" as JSON to be parsed back out.
         val_by_key: dict[Any, Any] = {}
         for r in rows:
@@ -82,7 +82,7 @@ def _compress_columnar(rows: list[dict[str, Any]], max_rows: int) -> dict[str, A
                 hash(val)
                 key_val = val
             except TypeError:
-                # Unhashable (dict/list) — use a sentinel-prefixed serialization
+                # Unhashable (dict/list) - use a sentinel-prefixed serialization
                 # that can never collide with a real string value.
                 key_val = "\x00json\x00" + json.dumps(val, sort_keys=True)
             val_counts[key_val] = val_counts.get(key_val, 0) + 1

@@ -1,6 +1,7 @@
 # src/pyrtk/cli.py
 from __future__ import annotations
 
+import importlib.metadata
 import sys
 
 import typer
@@ -118,11 +119,11 @@ def dedup(file: str = typer.Argument(None)) -> None:
     from .core.filter import dedup as run_dedup
 
     try:
-        content = (
-            open(file, encoding="utf-8").read()  # noqa: WPS515
-            if file
-            else sys.stdin.read()
-        )
+        if file:
+            with open(file, encoding="utf-8") as f:
+                content = f.read()
+        else:
+            content = sys.stdin.read()
     except FileNotFoundError:
         typer.echo(f"Error: file not found: {file}", err=True)
         raise typer.Exit(1)
@@ -135,11 +136,11 @@ def structure(file: str = typer.Argument(None)) -> None:
     from .core.filter import structure_only
 
     try:
-        content = (
-            open(file, encoding="utf-8").read()  # noqa: WPS515
-            if file
-            else sys.stdin.read()
-        )
+        if file:
+            with open(file, encoding="utf-8") as f:
+                content = f.read()
+        else:
+            content = sys.stdin.read()
     except FileNotFoundError:
         typer.echo(f"Error: file not found: {file}", err=True)
         raise typer.Exit(1)
@@ -149,7 +150,11 @@ def structure(file: str = typer.Argument(None)) -> None:
 @app.command()
 def version() -> None:
     """Show pyrtk version."""
-    typer.echo("pyrtk 0.2.0")
+    try:
+        pkg_version = importlib.metadata.version("pyrtk")
+    except importlib.metadata.PackageNotFoundError:
+        pkg_version = "0.2.0"
+    typer.echo(f"pyrtk {pkg_version}")
 
 
 if __name__ == "__main__":

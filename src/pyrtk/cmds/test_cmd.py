@@ -60,7 +60,7 @@ def _filter_test_output(raw: str, exit_code: int) -> str:
 
     # Detect collection errors before anything else
     if _COLLECTION_ERROR_RE.search(raw):
-        # Return the relevant section — don't say "all passed"
+        # Return the relevant section - don't say "all passed"
         relevant = [item for item in lines if item.strip() and not item.strip().startswith("=")]
         return "\n".join(relevant[:20]) or f"Collection error (exit {exit_code})"
 
@@ -86,7 +86,7 @@ def _filter_test_output(raw: str, exit_code: int) -> str:
     if not failures:
         if exit_code == 0:
             return summary_line or "all tests passed"
-        # Non-zero exit but no structured failures — tail of output
+        # Non-zero exit but no structured failures - tail of output
         tail = lines[-20:] if len(lines) > 20 else lines
         return "\n".join(tail) or f"tests failed (exit {exit_code})"
 
@@ -95,6 +95,6 @@ def _filter_test_output(raw: str, exit_code: int) -> str:
         result.append(summary_line)
 
     if len(failures) > _MAX_FAILURE_LINES:
-        result.append(f"[{len(failures) - _MAX_FAILURE_LINES} lines omitted — run directly for full output]")
+        result.append(f"[{len(failures) - _MAX_FAILURE_LINES} lines omitted - run directly for full output]")
 
     return "\n".join(result)

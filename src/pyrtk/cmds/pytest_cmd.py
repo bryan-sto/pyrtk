@@ -25,7 +25,7 @@ def _filter_pytest(raw: str) -> str:
             failures.append(line)
             continue
         if "=== ERRORS ===" in line:
-            # NOTE: Reset rather than continue accumulating — ERRORS is a
+            # NOTE: Reset rather than continue accumulating - ERRORS is a
             # distinct section from FAILURES; without this, if ERRORS appears
             # after FAILURES, lines bleed together.
             in_failures_section = True
@@ -63,7 +63,7 @@ def _filter_pytest(raw: str) -> str:
         if "no tests ran" in raw.lower() or "collected 0 items" in raw.lower():
             return "no tests collected"
         if "error" in raw.lower():
-            return raw[:400]  # collection error — return raw so agent sees it
+            return raw[:400]  # collection error - return raw so agent sees it
         return "all tests passed"
 
     # Return at most the configured lines of failures to avoid token bloat

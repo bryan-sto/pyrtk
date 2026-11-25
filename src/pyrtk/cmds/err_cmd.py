@@ -45,7 +45,7 @@ def _filter_errors(stdout: str, stderr: str) -> str:
         if line.strip():
             result.append(line)
 
-    # stdout — error-pattern lines only
+    # stdout - error-pattern lines only
     for line in stdout.splitlines():
         if _ERROR_RE.search(line):
             result.append(line)

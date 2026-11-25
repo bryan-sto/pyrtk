@@ -1,6 +1,6 @@
 [project]
 name = "pyrtk"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local RTK-equivalent proxy and MCP server for token compression."
 readme = "README.md"
 requires-python = ">=3.12"
