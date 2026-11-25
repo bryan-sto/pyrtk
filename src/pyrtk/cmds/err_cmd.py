@@ -3,10 +3,6 @@ from __future__ import annotations
 
 import re
 import sys
-import time
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
 
 _MAX_OUTPUT_LINES = 60
 
@@ -18,7 +14,7 @@ _ERROR_RE = re.compile(
 
 
 def run(args: list[str], verbose: bool = False) -> None:
-    """Generic wrapper — return only stderr and error-pattern lines from stdout.
+    """Generic wrapper - return only stderr and error-pattern lines from stdout.
 
     Usage: pyrtk err <any command> [args...]
 
@@ -29,28 +25,15 @@ def run(args: list[str], verbose: bool = False) -> None:
         print("Usage: pyrtk err <command> [args...]", file=sys.stderr)
         raise SystemExit(1)
 
-    t0 = time.time()
-    stdout, stderr, code = execute_command(args)
-    exec_ms = int((time.time() - t0) * 1000)
+    from ..core.dispatcher import run_cli_command
 
-    raw = strip_ansi(stdout + stderr)
-    filtered = _filter_errors(stdout, stderr)
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] err → {pct}% saved (exit: {code})", file=sys.stderr)
-
-    if filtered.strip():
-        print(filtered)
-    elif code != 0:
-        print(f"exit {code} (no error output captured — run command directly for full output)")
-    else:
-        print("ok")
-
-    track(" ".join(args), f"pyrtk err {' '.join(args)}", raw, filtered, exec_ms)
-
-    if code != 0:
-        raise SystemExit(code)
+    run_cli_command(
+        "err",
+        args,
+        verbose=verbose,
+        empty_ok_output="ok",
+        empty_err_output="exit {code} (no error output captured - run command directly for full output)",
+    )
 
 
 def _filter_errors(stdout: str, stderr: str) -> str:

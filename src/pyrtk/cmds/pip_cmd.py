@@ -2,12 +2,6 @@
 from __future__ import annotations
 
 import json
-import shutil
-import sys
-import time
-
-from ..core.utils import execute_command
-from ..tracker import track
 
 # Fields to keep from `pip show` output
 _SHOW_KEEP = {"Name", "Version", "Summary", "Requires", "Required-by", "Location"}
@@ -18,46 +12,10 @@ def run(args: list[str], verbose: bool = False) -> None:
 
     Prefers uv when available. Handles list and show subcommands.
     """
-    tool = "uv" if shutil.which("uv") else "pip"
-    sub = args[0] if args else "list"
+    from ..core.dispatcher import run_cli_command
 
-    if sub == "list":
-        cmd = ([tool, "pip", "list", "--format", "json"]
-               if tool == "uv"
-               else ["pip", "list", "--format", "json"])
-        t0 = time.time()
-        stdout, stderr, code = execute_command(cmd)
-        exec_ms = int((time.time() - t0) * 1000)
-        raw = stdout + stderr
-        filtered = _filter_list(stdout) if stdout.strip() else _filter_list(raw)
-
-    elif sub == "show":
-        cmd = ([tool, "pip", "show"] + args[1:]
-               if tool == "uv"
-               else ["pip", "show"] + args[1:])
-        t0 = time.time()
-        stdout, stderr, code = execute_command(cmd)
-        exec_ms = int((time.time() - t0) * 1000)
-        raw = stdout + stderr
-        filtered = _filter_show(stdout) if stdout.strip() else _filter_show(raw)
-
-    else:
-        cmd = ([tool, "pip"] + args if tool == "uv" else ["pip"] + args)
-        t0 = time.time()
-        stdout, stderr, code = execute_command(cmd)
-        exec_ms = int((time.time() - t0) * 1000)
-        raw = stdout + stderr
-        filtered = raw
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] pip {sub} → {pct}% saved", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(cmd), f"pyrtk pip {sub}", raw, filtered, exec_ms)
-
-    if code != 0:
-        raise SystemExit(code)
+    effective_args = args if args else ["list"]
+    run_cli_command("pip", effective_args, verbose=verbose)
 
 
 def _filter_list(raw: str) -> str:

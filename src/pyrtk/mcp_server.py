@@ -4,16 +4,15 @@ from __future__ import annotations
 import json
 import os
 import re
-import threading
 import time
 from pathlib import Path
 
 import requests
 from mcp.server.fastmcp import FastMCP
 
+from . import tracker
 from .core.dispatcher import dispatch_command
 from .core.utils import (
-    estimate_tokens,
     execute_command,
     get_execution_env,
     resolve_executable,
@@ -52,55 +51,19 @@ mcp = FastMCP("pyrtk")
 _MEMCORE_PORT = os.getenv("MEMCORE_PORT", "3111")
 
 
-def _post_to_memcore(payload: dict) -> None:
-    """Fire-and-forget MemCore log call. Runs in daemon thread."""
-    try:
-        requests.post(
-            f"http://localhost:{_MEMCORE_PORT}/agentmemory/command/log",
-            json=payload,
-            timeout=2,
-        )
-    except requests.exceptions.RequestException:
-        pass
-
-
 def _log(command: str, cwd: str, raw: str, filtered: str, exec_ms: int) -> None:
-    """Build and fire the MemCore tracking payload asynchronously and save locally."""
-    inp = estimate_tokens(raw)
-    out = estimate_tokens(filtered)
-    saved = max(0, inp - out)
-    pct = round((saved / inp * 100) if inp > 0 else 0.0, 1)
-
-    project = Path(cwd).resolve().name
-    now_str = utc_now_iso()
-    clean_cmd = scrub_secrets(command)
-
-    # Persist locally in SQLite registry
-    from .registry import registry
-    registry.log_command(
-        timestamp=now_str,
-        project=project,
-        command=clean_cmd,
-        input_t=inp,
-        output_t=out,
-        saved_t=saved,
-        pct=pct,
-        exec_ms=exec_ms,
-    )
-
-    payload = {
-        "timestamp": now_str,
-        "project": project,
-        "command": clean_cmd,
-        "input_t": inp,
-        "output_t": out,
-        "saved_t": saved,
-        "pct": pct,
-        "exec_ms": exec_ms,
-    }
-    # Log locally in pyrtk.log
-    write_log("CMD", f"rtk_run_command - Cmd: \"{clean_cmd}\", Saved: {saved} tokens ({pct}%), Exec: {exec_ms}ms")
-    threading.Thread(target=_post_to_memcore, args=(payload,), daemon=True).start()
+    """Delegate telemetry tracking to tracker.track() and write to pyrtk.log."""
+    payload = tracker.track(command, f"pyrtk {command}", raw, filtered, exec_ms, cwd=cwd)
+    if isinstance(payload, dict):
+        clean_cmd = payload.get("command", scrub_secrets(command))
+        saved = payload.get("saved_t", 0)
+        pct = payload.get("pct", 0.0)
+        write_log(
+            "CMD",
+            f'rtk_run_command - Cmd: "{clean_cmd}", Saved: {saved} tokens ({pct}%), Exec: {exec_ms}ms',
+        )
+    else:
+        write_log("CMD", f'rtk_run_command - Cmd: "{scrub_secrets(command)}", Exec: {exec_ms}ms')
 
 
 def _validate_cwd(cwd: str) -> str | None:

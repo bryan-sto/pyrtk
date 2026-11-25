@@ -5,12 +5,7 @@ import json
 import logging
 import os
 import re
-import sys
-import time
 from collections import defaultdict
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
 
 logger = logging.getLogger(__name__)
 
@@ -19,44 +14,14 @@ _MAX_PER_RULE = int(os.getenv("RTK_MAX_PER_RULE", "3"))
 
 
 def run(args: list[str], verbose: bool = False) -> None:
-    """Proxy ruff — violations grouped by rule code via JSON output.
+    """Proxy ruff - violations grouped by rule code via JSON output.
 
     Subcommands handled: check (default), format.
     Falls back to text parsing if JSON mode fails.
     """
-    sub = args[0] if args else "check"
-    is_check = sub == "check" or (sub not in ("format", "version", "help", "rule") and not sub.startswith("-"))
+    from ..core.dispatcher import run_cli_command
 
-    if is_check:
-        clean_args = [a for a in args if a != "check"]
-        clean_args = [a for a in clean_args if not a.startswith("--output-format")]
-        cmd = ["ruff", "check", "--output-format", "json"] + clean_args
-    else:
-        cmd = ["ruff"] + args
-
-    t0 = time.time()
-    stdout, stderr, code = execute_command(cmd)
-    exec_ms = int((time.time() - t0) * 1000)
-
-    raw = strip_ansi(stdout + stderr)
-
-    if is_check:
-        clean_stdout = strip_ansi(stdout)
-        filtered = _filter_check_json(clean_stdout) or _filter_check_text(raw)
-    elif sub == "format":
-        filtered = _filter_format(raw)
-    else:
-        filtered = raw
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] ruff {sub} → {pct}% saved", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms)
-
-    if code != 0:
-        raise SystemExit(code)
+    run_cli_command("ruff", args, verbose=verbose)
 
 
 def _filter_check_json(json_stdout: str) -> str | None:

@@ -3,13 +3,7 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import sys
-import time
 from collections import defaultdict
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
 
 _MAX_FILES = int(os.getenv("RTK_GREP_MAX_FILES", "15"))
 _PREVIEW_LEN = int(os.getenv("RTK_GREP_PREVIEW_LEN", "80"))
@@ -24,26 +18,9 @@ def run(args: list[str], verbose: bool = False) -> None:
     Auto-selects rg over grep when available.
     Exit code 1 (no matches) is not treated as an error.
     """
-    tool = "rg" if shutil.which("rg") else "grep"
-    cmd = [tool] + args
+    from ..core.dispatcher import run_cli_command
 
-    t0 = time.time()
-    stdout, stderr, code = execute_command(cmd)
-    exec_ms = int((time.time() - t0) * 1000)
-
-    raw = strip_ansi(stdout + stderr)
-    filtered = _filter_grep(raw)
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] {tool} → {pct}% saved", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms)
-
-    # Exit 1 from grep/rg means "no matches" - not a failure worth propagating
-    if code not in (0, 1):
-        raise SystemExit(code)
+    run_cli_command("grep", args, verbose=verbose, allowed_exit_codes=(0, 1))
 
 
 def _filter_grep(raw: str) -> str:

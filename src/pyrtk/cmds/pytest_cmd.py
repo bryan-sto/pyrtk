@@ -3,33 +3,15 @@ from __future__ import annotations
 
 import os
 import re
-import sys
-import time
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
 
 _MAX_FAILURE_LINES = int(os.getenv("RTK_MAX_FAILURE_LINES", "50"))
 
 
 def run(args: list[str], verbose: bool = False) -> None:
-    cmd = ["pytest"] + args
-    t0 = time.time()
-    stdout, stderr, code = execute_command(cmd)
-    exec_ms = int((time.time() - t0) * 1000)
+    """Proxy pytest - failures only."""
+    from ..core.dispatcher import run_cli_command
 
-    raw = strip_ansi(stdout + stderr)
-    filtered = _filter_pytest(raw)
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] pytest → {pct}% saved", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms)
-
-    if code != 0:
-        raise SystemExit(code)
+    run_cli_command("pytest", args, verbose=verbose)
 
 
 def _filter_pytest(raw: str) -> str:

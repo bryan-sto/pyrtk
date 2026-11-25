@@ -2,11 +2,6 @@
 from __future__ import annotations
 
 import re
-import sys
-import time
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
 
 
 def get_optimised_git_command(args: list[str]) -> list[str]:
@@ -33,37 +28,10 @@ def get_optimised_git_command(args: list[str]) -> list[str]:
 
 
 def run(args: list[str], verbose: bool = False) -> None:
-    sub = args[0] if args else ""
-    cmd = ["git"] + args
+    """Proxy git - compact status, log, diff, push output."""
+    from ..core.dispatcher import run_cli_command
 
-    exec_cmd = get_optimised_git_command(cmd)
-
-    t0 = time.time()
-    stdout, stderr, code = execute_command(exec_cmd)
-    exec_ms = int((time.time() - t0) * 1000)
-
-    raw = strip_ansi(stdout + stderr)
-
-    if sub == "status":
-        filtered = _filter_status(raw)
-    elif sub == "log":
-        filtered = _filter_log(raw)
-    elif sub in ("add", "commit", "push", "pull"):
-        filtered = _filter_simple(raw, sub)
-    elif sub == "diff":
-        filtered = _filter_diff(raw, args)
-    else:
-        filtered = raw
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] git {sub} → {pct}% saved", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms)
-
-    if code != 0:
-        raise SystemExit(code)
+    run_cli_command("git", args, verbose=verbose)
 
 
 def _filter_status(raw: str) -> str:

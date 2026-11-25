@@ -5,6 +5,7 @@ import logging
 import os
 import threading
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -30,7 +31,7 @@ def track(
     filtered: str,
     exec_ms: int,
     cwd: str = ".",
-) -> None:
+) -> dict[str, Any]:
     """Async tracking function. Logs metadata to local SQLite and MemCore."""
     inp = estimate_tokens(raw)
     out = estimate_tokens(filtered)
@@ -70,6 +71,7 @@ def track(
         args=(payload, port),
         daemon=True,
     ).start()
+    return payload
 
 
 def report() -> None:

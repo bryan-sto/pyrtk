@@ -4,10 +4,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import time
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
 
 _MAX_FAILURE_LINES = int(os.getenv("RTK_MAX_FAILURE_LINES", "80"))
 
@@ -40,7 +36,7 @@ _COLLECTION_ERROR_RE = re.compile(
 
 
 def run(args: list[str], verbose: bool = False) -> None:
-    """Generic test runner wrapper — show failures only.
+    """Generic test runner wrapper - show failures only.
 
     Usage: pyrtk test <command> [args...]
     Example: pyrtk test go test ./...
@@ -53,22 +49,9 @@ def run(args: list[str], verbose: bool = False) -> None:
         print("Usage: pyrtk test <command> [args...]", file=sys.stderr)
         raise SystemExit(1)
 
-    t0 = time.time()
-    stdout, stderr, code = execute_command(args)
-    exec_ms = int((time.time() - t0) * 1000)
+    from ..core.dispatcher import run_cli_command
 
-    raw = strip_ansi(stdout + stderr)
-    filtered = _filter_test_output(raw, code)
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] test → {pct}% saved (exit: {code})", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(args), f"pyrtk test {' '.join(args)}", raw, filtered, exec_ms)
-
-    if code != 0:
-        raise SystemExit(code)
+    run_cli_command("test", args, verbose=verbose)
 
 
 def _filter_test_output(raw: str, exit_code: int) -> str:

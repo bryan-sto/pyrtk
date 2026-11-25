@@ -1180,3 +1180,131 @@ def test_registry_lazy_proxy(tmp_path, monkeypatch):
         reg_mod._registry_instance = old_instance
 
 
+def test_dispatch_read_level_flag_and_env(tmp_path, monkeypatch):
+    from src.pyrtk.core.dispatcher import dispatch_command
+
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "def greet(name: str) -> str:\n"
+        "    msg = f'hi {name}'\n"
+        "    return msg\n",
+        encoding="utf-8",
+    )
+
+    res_flag = dispatch_command(["read", str(sample), "--level", "aggressive"])
+    assert res_flag.exit_code == 0
+    assert "def greet(name: str) -> str:" in res_flag.filtered
+    assert "return msg" not in res_flag.filtered
+    assert "..." in res_flag.filtered
+
+    monkeypatch.setenv("RTK_READ_LEVEL", "aggressive")
+    res_env = dispatch_command(["read", str(sample)])
+    assert res_env.exit_code == 0
+    assert "def greet(name: str) -> str:" in res_env.filtered
+    assert "return msg" not in res_env.filtered
+    assert "..." in res_env.filtered
+
+
+def test_dispatch_pip_list_preserves_extra_flags(monkeypatch):
+    from src.pyrtk.core.dispatcher import dispatch_command
+
+    executed_cmds: list[list[str]] = []
+
+    def mock_execute(cmd, cwd="."):
+        executed_cmds.append(list(cmd))
+        return ('[{"name": "pkg", "version": "1.0.0"}]', "", 0)
+
+    monkeypatch.setattr("src.pyrtk.core.dispatcher.execute_command", mock_execute)
+
+    res_pip = dispatch_command(["pip", "list", "--outdated"])
+    assert res_pip.exit_code == 0
+    assert "--outdated" in executed_cmds[0]
+    assert "--format" in executed_cmds[0]
+    assert "json" in executed_cmds[0]
+
+    res_uv = dispatch_command(["uv", "pip", "list", "--editable", "--local"])
+    assert res_uv.exit_code == 0
+    assert "--editable" in executed_cmds[1]
+    assert "--local" in executed_cmds[1]
+
+
+def test_dispatch_ls_single_file(tmp_path):
+    from src.pyrtk.core.dispatcher import dispatch_command
+
+    target = tmp_path / "hello.txt"
+    target.write_text("hello", encoding="utf-8")
+
+    res = dispatch_command(["ls", str(target)])
+    assert res.exit_code == 0
+    assert res.filtered == "hello.txt (5B)"
+
+
+def test_cmds_read_and_git_run(tmp_path, monkeypatch, capsys):
+    from src.pyrtk.cmds import git as git_cmd
+    from src.pyrtk.cmds import grep_cmd, read_cmd
+
+    tracked: list[tuple] = []
+
+    def fake_track(orig, rtk, raw, filtered, exec_ms, cwd="."):
+        tracked.append((orig, rtk, raw, filtered, exec_ms, cwd))
+        return {"command": orig, "saved_t": 0, "pct": 0.0}
+
+    monkeypatch.setattr("src.pyrtk.tracker.track", fake_track)
+
+    sample = tmp_path / "demo.py"
+    sample.write_text("def add(a: int, b: int) -> int:\n    return a + b\n", encoding="utf-8")
+    read_cmd.run([str(sample), "--level", "aggressive"])
+    captured = capsys.readouterr()
+    assert "def add(a: int, b: int) -> int:" in captured.out
+    assert "return a + b" not in captured.out
+    assert len(tracked) == 1
+
+    monkeypatch.setattr(
+        "src.pyrtk.core.dispatcher.execute_command",
+        lambda cmd, cwd=".": (" M src/app.py\n", "", 0),
+    )
+    git_cmd.run(["status"])
+    captured = capsys.readouterr()
+    assert "modified: M src/app.py" in captured.out
+    assert len(tracked) == 2
+
+    monkeypatch.setattr(
+        "src.pyrtk.core.dispatcher.execute_command",
+        lambda cmd, cwd=".": ("fatal: bad\n", "", 128),
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        git_cmd.run(["status"])
+    assert exc_info.value.code == 128
+
+    monkeypatch.setattr(
+        "src.pyrtk.core.dispatcher.execute_command",
+        lambda cmd, cwd=".": ("", "", 1),
+    )
+    grep_cmd.run(["needle", "file.py"])
+    captured = capsys.readouterr()
+    assert "no matches" in captured.out
+
+
+def test_mcp_server_log_delegates_to_tracker(tmp_path, monkeypatch):
+    from src.pyrtk import mcp_server
+
+    track_calls: list[tuple] = []
+    log_calls: list[tuple] = []
+
+    def fake_track(orig, rtk, raw, filtered, exec_ms, cwd="."):
+        track_calls.append((orig, rtk, raw, filtered, exec_ms, cwd))
+        return {"command": "git status", "saved_t": 12, "pct": 75.0}
+
+    monkeypatch.setattr("src.pyrtk.tracker.track", fake_track)
+    monkeypatch.setattr(mcp_server, "write_log", lambda tag, msg: log_calls.append((tag, msg)))
+
+    mcp_server._log("git status", str(tmp_path), "raw" * 20, "filtered", 5)
+    assert len(track_calls) == 1
+    assert track_calls[0][0] == "git status"
+    assert track_calls[0][5] == str(tmp_path)
+    assert len(log_calls) == 1
+    assert log_calls[0][0] == "CMD"
+    assert "Saved: 12 tokens (75.0%)" in log_calls[0][1]
+
+
+

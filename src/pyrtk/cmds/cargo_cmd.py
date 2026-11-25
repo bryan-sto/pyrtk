@@ -1,42 +1,14 @@
 # src/pyrtk/cmds/cargo_cmd.py
 from __future__ import annotations
 
-import sys
-import time
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
-
 _MAX_LINES = 60
 
 
 def run(args: list[str], verbose: bool = False, cwd: str = ".") -> None:
     """Proxy cargo - compact test, clippy, and build output."""
-    sub = args[0] if args else "build"
-    cmd = ["cargo"] + args
+    from ..core.dispatcher import run_cli_command
 
-    t0 = time.time()
-    stdout, stderr, code = execute_command(cmd, cwd=cwd)
-    exec_ms = int((time.time() - t0) * 1000)
-
-    raw = strip_ansi(stdout + stderr)
-
-    if sub == "test":
-        filtered = _filter_cargo_test(raw, code)
-    elif sub == "clippy":
-        filtered = _filter_cargo_clippy(raw)
-    else:
-        filtered = _filter_cargo_build(raw, code)
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] cargo {sub} → {pct}% saved", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(cmd), f"pyrtk {' '.join(cmd)}", raw, filtered, exec_ms, cwd=cwd)
-
-    if code != 0:
-        raise SystemExit(code)
+    run_cli_command("cargo", args, verbose=verbose, cwd=cwd)
 
 
 def _filter_cargo_test(raw: str, code: int) -> str:

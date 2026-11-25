@@ -2,13 +2,8 @@
 from __future__ import annotations
 
 import os
-import sys
-import time
 from collections import defaultdict
 from pathlib import Path
-
-from ..core.utils import execute_command, strip_ansi
-from ..tracker import track
 
 _MAX_DIRS = int(os.getenv("RTK_FIND_MAX_DIRS", "20"))
 _RAW_THRESHOLD = int(os.getenv("RTK_FIND_RAW_THRESHOLD", "5"))
@@ -53,33 +48,9 @@ def _python_find(args: list[str], cwd: str = ".") -> list[str]:
 
 def run(args: list[str], verbose: bool = False, cwd: str = ".") -> None:
     """Proxy find - collapse flat path list into a directory summary with counts."""
-    # Check if native find is Windows System32 find.exe (which does string matching, not file search)
-    import shutil
-    find_bin = shutil.which("find")
-    is_win_system_find = sys.platform == "win32" and find_bin and "system32" in find_bin.lower()
+    from ..core.dispatcher import run_cli_command
 
-    t0 = time.time()
-    if is_win_system_find or (sys.platform == "win32" and any(a.startswith("-") for a in args)):
-        paths = _python_find(args, cwd=cwd)
-        raw = "\n".join(paths)
-        code = 0
-    else:
-        cmd = ["find"] + args
-        stdout, stderr, code = execute_command(cmd, cwd=cwd)
-        raw = strip_ansi(stdout + stderr)
-
-    exec_ms = int((time.time() - t0) * 1000)
-    filtered = _filter_find(raw)
-
-    if verbose:
-        pct = int(max(0, len(raw) - len(filtered)) / max(len(raw), 1) * 100)
-        print(f"[pyrtk] find → {pct}% saved", file=sys.stderr)
-
-    print(filtered)
-    track(" ".join(["find"] + args), f"pyrtk {' '.join(['find'] + args)}", raw, filtered, exec_ms)
-
-    if code != 0:
-        raise SystemExit(code)
+    run_cli_command("find", args, verbose=verbose, cwd=cwd)
 
 
 def _filter_find(raw: str) -> str:
